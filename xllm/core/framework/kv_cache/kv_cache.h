@@ -37,6 +37,10 @@ class KVCache final {
           torch::Tensor index_cache,
           torch::Tensor key_cache_scale,
           torch::Tensor value_cache_scale);
+  KVCache(torch::Tensor key_cache,
+          torch::Tensor value_cache,
+          torch::Tensor conv_cache,
+          torch::Tensor ssm_cache);
   KVCache(std::shared_ptr<XTensor> key_xtensor,
           std::shared_ptr<XTensor> value_xtensor);
   ~KVCache() = default;
@@ -50,6 +54,8 @@ class KVCache final {
   std::optional<torch::Tensor> get_k_cache_scale() const;
   std::optional<torch::Tensor> get_v_cache_scale() const;
 
+  torch::Tensor get_conv_cache() const;
+  torch::Tensor get_ssm_cache() const;
   std::vector<std::vector<int64_t>> get_shapes();
 
   std::shared_ptr<XTensor> get_k_xtensor() const;
@@ -72,6 +78,8 @@ class KVCache final {
   torch::Tensor key_cache_scale_;
   torch::Tensor value_cache_scale_;
 
+  torch::Tensor conv_cache_;
+  torch::Tensor ssm_cache_;
   // for continuous kvcache
   std::shared_ptr<XTensor> key_xtensor_;
   std::shared_ptr<XTensor> value_xtensor_;
