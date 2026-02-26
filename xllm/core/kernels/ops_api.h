@@ -111,5 +111,15 @@ torch::Tensor fp8_scaled_matmul(Fp8ScaledMatmulParams& params);
 // Static scaled FP8 quantization helper
 // Quantizes input tensor to FP8 using a pre-computed scale factor
 void static_scaled_fp8_quant(StaticScaledFp8QuantParams& params);
+std::pair<torch::Tensor, torch::Tensor> fused_gdn_gating(FusedGdnGatingParams& params);
+
+std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
+    FusedRecurrentGatedDeltaRuleParams& params);
+
+torch::Tensor causal_conv1d_update(CausalConv1dUpdateParams& params);
+
+torch::Tensor gated_layer_norm(GatedLayerNormParams& params);
+
+std::pair<torch::Tensor, torch::Tensor> partial_rotary_embedding(PartialRotaryEmbeddingParams& params);
 
 }  // namespace xllm::kernel
