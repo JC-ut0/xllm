@@ -762,7 +762,8 @@ moe_init_routing_v2(MoeInitRoutingV2Params& params) {
 #endif
 }
 
-std::pair<torch::Tensor, torch::Tensor> fused_gdn_gating(FusedGdnGatingParams& params) {
+std::pair<torch::Tensor, torch::Tensor> fused_gdn_gating(
+    FusedGdnGatingParams& params) {
 #if defined(USE_NPU)
   return npu::npu_fused_gdn_gating(params.A_log,
                                    params.a,
@@ -838,20 +839,19 @@ void static_scaled_fp8_quant(StaticScaledFp8QuantParams& params) {
 
 torch::Tensor causal_conv1d_update(CausalConv1dUpdateParams& params) {
 #if defined(USE_NPU)
-  return npu::npu_causal_conv1d_update(
-      params.x,
-      params.conv_state,
-      params.weight,
-      params.activation,
-      params.bias,
-      params.cache_seqlens,
-      params.conv_state_indices,
-      params.num_accepted_tokens,
-      params.query_start_loc,
-      params.max_query_len,
-      params.intermediate_conv_window,
-      params.pad_slot_id,
-      params.validate_data);
+  return npu::npu_causal_conv1d_update(params.x,
+                                       params.conv_state,
+                                       params.weight,
+                                       params.activation,
+                                       params.bias,
+                                       params.cache_seqlens,
+                                       params.conv_state_indices,
+                                       params.num_accepted_tokens,
+                                       params.query_start_loc,
+                                       params.max_query_len,
+                                       params.intermediate_conv_window,
+                                       params.pad_slot_id,
+                                       params.validate_data);
 #else
   NOT_IMPLEMENTED();
 #endif
@@ -859,31 +859,29 @@ torch::Tensor causal_conv1d_update(CausalConv1dUpdateParams& params) {
 
 torch::Tensor gated_layer_norm(GatedLayerNormParams& params) {
 #if defined(USE_NPU)
-  return npu::layer_norm_fwd(
-      params.x,
-      params.weight,
-      params.bias,
-      params.eps,
-      params.z,
-      params.group_size,
-      params.norm_before_gate,
-      params.is_rms_norm);
+  return npu::layer_norm_fwd(params.x,
+                             params.weight,
+                             params.bias,
+                             params.eps,
+                             params.z,
+                             params.group_size,
+                             params.norm_before_gate,
+                             params.is_rms_norm);
 #else
   NOT_IMPLEMENTED();
 #endif
 }
 
-std::pair<torch::Tensor, torch::Tensor> partial_rotary_embedding(PartialRotaryEmbeddingParams& params) {
+std::pair<torch::Tensor, torch::Tensor> partial_rotary_embedding(
+    PartialRotaryEmbeddingParams& params) {
 #if defined(USE_NPU)
-  return npu::apply_npu_partial_rotary_embedding(
-    params.positions,
-    params.query,
-    params.key,
-    params.head_size,
-    params.rotary_dim,
-    params.cos_sin_cache,
-    params.is_neox_style
-  );
+  return npu::apply_npu_partial_rotary_embedding(params.positions,
+                                                 params.query,
+                                                 params.key,
+                                                 params.head_size,
+                                                 params.rotary_dim,
+                                                 params.cos_sin_cache,
+                                                 params.is_neox_style);
 #else
   NOT_IMPLEMENTED();
 #endif
