@@ -741,7 +741,7 @@ void WorkerImpl::prepare_mla_prefixcache_inputs(
                    torch::TensorOptions().dtype(dtype_).pinned_memory(true))
           .to(device_);
   ;
-  LOG(INFO) << “worker_impl.cpp”;
+  LOG(INFO) << "worker_impl.cpp";
 
   input_params.ring_cur_seqlen =
       torch::stack({input_params.q_seq_lens, input_params.q_seq_lens})

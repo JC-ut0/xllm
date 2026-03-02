@@ -460,6 +460,20 @@ torch::Tensor Qwen3NextGatedDeltaNetImpl::reshape_qkvz_unpad(
 torch::Tensor Qwen3NextGatedDeltaNetImpl::reshape_qkvz_with_pad(
     const AttentionMetadata& attn_metadata,
     const torch::Tensor& qkvz) {
+  // 打印attn_metadata的所有信息
+  LOG(INFO) << "attn_metadata信息:";
+  LOG(INFO) << "  is_prefill: " << std::boolalpha << attn_metadata.is_prefill;
+  LOG(INFO) << "  max_query_len: " << attn_metadata.max_query_len;
+  LOG(INFO) << "  q_seq_lens shape: " << attn_metadata.q_seq_lens.sizes() 
+            << ", 值: " << attn_metadata.q_seq_lens;
+  LOG(INFO) << "  q_cu_seq_lens shape: " << attn_metadata.q_cu_seq_lens.sizes() 
+            << ", 值: " << attn_metadata.q_cu_seq_lens;
+  LOG(INFO) << "  block_table shape: " << attn_metadata.block_table.sizes() 
+            << ", 值: " << attn_metadata.block_table;
+  LOG(INFO) << "  context_len: " << attn_metadata.context_len;
+  LOG(INFO) << "  max_context_len: " << attn_metadata.max_context_len;
+  LOG(INFO) << "  is_prompt: " << std::boolalpha << attn_metadata.is_prompt;
+  LOG(INFO) << "  is_first_token: " << std::boolalpha << attn_metadata.is_first_token;
   int64_t bs = attn_metadata.q_seq_lens.size(0);
   int64_t max_len = attn_metadata.max_query_len;
   const auto& start_loc = attn_metadata.q_cu_seq_lens;
