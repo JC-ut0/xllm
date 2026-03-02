@@ -462,16 +462,14 @@ torch::Tensor Qwen3NextGatedDeltaNetImpl::reshape_qkvz_with_pad(
     const torch::Tensor& qkvz) {
   int64_t bs = attn_metadata.q_seq_lens.size(0);
   int64_t max_len = attn_metadata.max_query_len;
-  const auto& start_loc = attn_metadata.q_seq_lens;
+  const auto& start_loc = attn_metadata.q_cu_seq_lens;
   if (!attn_metadata.is_prefill) {
     return qkvz.view({bs, -1, qkvz.size(-1)});
   }
   std::vector<torch::Tensor> batches;
-  int64_t idx = 0;
   for (int64_t b = 0; b < bs; ++b) {
-    int64_t cur_len = start_loc[b].template item<int64_t>();
-    torch::Tensor batch = qkvz.slice(0, idx, idx + cur_len).contiguous();
-    idx = idx + cur_len;
+    int64_t cur_len = start_loc[b+1].template item<int64_t>() - start_loc[b].template item<int64_t>();
+    torch::Tensor batch = qkvz.slice(0, start_loc[b].template item<int64_t>(), start_loc[b+1].template item<int64_t>()).contiguous();
     if (batch.size(0) != max_len) {
       batch = batch.size(0) > max_len
                   ? batch.slice(0, 0, max_len).contiguous()
@@ -482,6 +480,11 @@ torch::Tensor Qwen3NextGatedDeltaNetImpl::reshape_qkvz_with_pad(
                         .contiguous();
     }
     batches.push_back(batch);
+  }
+  LOG(INFO) << "qwen3_next_gated_delta_net.cpp";
+  // 打印batches中每个Tensor的shape
+  for (size_t i = 0; i < batches.size(); ++i) {
+    LOG(INFO) << "batches[" << i << "] shape: " << batches[i].sizes();
   }
   auto ret = torch::stack(batches, 0).contiguous();
   return ret;

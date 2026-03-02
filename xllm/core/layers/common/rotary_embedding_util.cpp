@@ -171,6 +171,7 @@ torch::Tensor compute_rotary_embedding(int64_t dim,
   if (use_cat) {
     emb = torch::cat({freqs, freqs}, -1);
   } else {
+    LOG(INFO) << "rotary_embedding_util.cpp";
     emb = torch::stack({freqs, freqs}, -1);
     emb = emb.reshape({seq_len, dim});
   }

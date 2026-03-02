@@ -36,6 +36,7 @@ using ISlice = torch::indexing::Slice;
 inline torch::Tensor rotate_every_two(const torch::Tensor& x) {
   auto x1 = x.index({ISlice(), ISlice(), ISlice(0, None, 2)});
   auto x2 = x.index({ISlice(), ISlice(), ISlice(1, None, 2)});
+  LOG(INFO) << "rotary_embedding.cpp";
   return torch::stack({-x2, x1}, /*dim=*/-1).flatten(/*start_dim=*/-2);
 }
 
