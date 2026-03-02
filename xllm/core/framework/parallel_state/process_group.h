@@ -39,27 +39,18 @@ c10::intrusive_ptr<c10d::Store> create_tcp_store(const std::string& host,
 
 class ProcessGroup {
  public:
-  ProcessGroup(int32_t rank, int32_t world_size, const torch::Device& device)
-      : rank_(rank), world_size_(world_size), device_(device) {}
+  ProcessGroup(const torch::Device& device) : device_(device) {}
 
   virtual ~ProcessGroup() = default;
 
-  int32_t rank() const {
-#if defined(USE_NPU)
-    return rank_;
-#else
+  int rank() const {
     CHECK(pg_ != nullptr) << "Process group is not initialized.";
     return pg_->getRank();
-#endif
   }
 
-  int32_t world_size() const {
-#if defined(USE_NPU)
-    return world_size_;
-#else
+  int world_size() const {
     CHECK(pg_ != nullptr) << "Process group is not initialized.";
     return pg_->getSize();
-#endif
   }
 
   const torch::Device& device() const { return device_; }
@@ -79,13 +70,7 @@ class ProcessGroup {
                               torch::Tensor& output);
 
  private:
-  // rank of current process.
-  int32_t rank_ = 0;
-
-  // number of processes.
-  int32_t world_size_ = 0;
-
-  // device of current process.
+  // device of current process
   torch::Device device_;
 
  protected:
