@@ -83,10 +83,8 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
       comm_stream_(c10_npu::getNPUStreamFromPool(device.index())) {
   c10::intrusive_ptr<c10d_npu::ProcessGroupHCCL::Options> hccl_pg_options =
       c10d_npu::ProcessGroupHCCL::Options::create();
-#if TORCH_VERSION_MAJOR > 2 || \
-    (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 7)
-  hccl_pg_options->group_name = group_name;
-#endif
+  hccl_pg_options->group_id = group_name;
+
   int32_t rank = global_rank;
   if (world_size != rank_size) {
     auto [local_rank, group_ranks] =
@@ -131,6 +129,14 @@ void ProcessGroupImpl::allgather(const torch::Tensor& input,
   check_input(input);
   torch::DeviceGuard device_guard(device());
 
+  if (pg_) {
+    std::vector<torch::Tensor> input_tensors = {input};
+    std::vector<std::vector<torch::Tensor>> output_tensors = {outputs};
+    pg_->allgather(output_tensors, input_tensors)->wait();
+    return;
+  }
+  CHECK(comm_ != nullptr) << "HCCL comm is not initialized.";
+
   torch::Tensor flattened_output = flatten_for_scatter_gather(outputs);
 
   const auto count = input.numel();
@@ -169,6 +175,13 @@ void ProcessGroupImpl::allreduce(torch::Tensor& input) {
       << "input should be on the same device as the process group";
   check_input(input);
   torch::DeviceGuard device_guard(device());
+
+  if (pg_) {
+    std::vector<torch::Tensor> input_tensors = {input};
+    pg_->allreduce(input_tensors)->wait();
+    return;
+  }
+  CHECK(comm_ != nullptr) << "HCCL comm is not initialized.";
 
   const auto count = input.numel();
   const auto data_type = to_hccl_data_type(input);

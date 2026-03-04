@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include "param.h"
+#include "triton_npu/torch_api/triton_ops_api.h"
 
 namespace xllm::kernel {
 
@@ -93,7 +94,6 @@ void fused_mla_kv(FusedMlaKVParams& params);
 void fused_indexer_q(FusedIndexerQParams& params);
 
 void fused_indexer_k(FusedIndexerKParams& params);
-
 // TODO: NPU moe_init_routing_v2 is equivalent to moe_gen_idx + moe_expand_input
 // (and token_count/cusum outputs) on other backends.
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
@@ -111,5 +111,18 @@ torch::Tensor fp8_scaled_matmul(Fp8ScaledMatmulParams& params);
 // Static scaled FP8 quantization helper
 // Quantizes input tensor to FP8 using a pre-computed scale factor
 void static_scaled_fp8_quant(StaticScaledFp8QuantParams& params);
+
+std::pair<torch::Tensor, torch::Tensor> fused_gdn_gating(
+    FusedGdnGatingParams& params);
+
+std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
+    FusedRecurrentGatedDeltaRuleParams& params);
+
+torch::Tensor causal_conv1d_update(CausalConv1dUpdateParams& params);
+
+torch::Tensor gated_layer_norm(GatedLayerNormParams& params);
+
+std::pair<torch::Tensor, torch::Tensor> partial_rotary_embedding(
+    PartialRotaryEmbeddingParams& params);
 
 }  // namespace xllm::kernel
