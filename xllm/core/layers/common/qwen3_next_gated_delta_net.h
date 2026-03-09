@@ -23,6 +23,7 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
+#include "framework/prefix_cache/mamba_cache_manager.h"
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/state_dict/utils.h"
@@ -41,9 +42,12 @@ class Qwen3NextGatedDeltaNetImpl : public torch::nn::Module {
   torch::Tensor forward(const torch::Tensor& hidden_states,
                         const AttentionMetadata& attn_metadata,
                         KVCache& kv_cache,
-			            const ModelInputParams& input_params);
+                        const ModelInputParams& input_params);
 
   void load_state_dict(const StateDict& state_dict);
+
+  void set_mamba_cache_mode(MambaCacheMode mode) { mamba_cache_mode_ = mode; }
+  void set_mamba_block_size(int32_t block_size) { mamba_block_size_ = block_size; }
 
  private:
   std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> 
@@ -64,6 +68,9 @@ class Qwen3NextGatedDeltaNetImpl : public torch::nn::Module {
   int64_t tp_size_; 
   int64_t rank_;
   int32_t conv_kernel_size_;
+
+  MambaCacheMode mamba_cache_mode_ = MambaCacheMode::kNone;
+  int32_t mamba_block_size_ = 0;
 
   ColumnParallelLinear qkvz_proj_{nullptr};
   ColumnParallelLinear ba_proj_{nullptr};

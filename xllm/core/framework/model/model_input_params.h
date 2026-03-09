@@ -26,6 +26,7 @@ limitations under the License.
 #include "platform/npu/npu_layer_synchronizer.h"
 #endif
 #include "framework/batch/batch_forward_type.h"
+#include "framework/prefix_cache/mamba_cache_manager.h"
 #include "framework/request/mm_batch_data.h"
 #include "npu_dp_ep_padding.h"
 #include "util/hash_util.h"
@@ -339,6 +340,10 @@ struct ModelInputParams {
       params.rec_params = llmrec->to(device);
     }
 
+    // mamba cache mode for linear attention layers
+    params.mamba_cache_mode = mamba_cache_mode;
+    params.mamba_block_size = mamba_block_size;
+
     return params;
   }
 
@@ -534,6 +539,10 @@ struct ModelInputParams {
 
   // Flag for CUDA graph capture mode
   bool enable_cuda_graph = false;
+
+  // Mamba cache mode for linear attention layers (e.g., Qwen3-Next GDN)
+  MambaCacheMode mamba_cache_mode = MambaCacheMode::kNone;
+  int32_t mamba_block_size = 0;
 };
 
 }  // namespace xllm

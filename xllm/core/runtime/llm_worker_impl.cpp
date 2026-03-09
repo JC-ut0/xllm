@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
+#include "framework/prefix_cache/mamba_cache_manager.h"
 #include "framework/state_dict/state_dict.h"
 #if defined(USE_CUDA) || defined(USE_ILU)
 #include "layers/cuda/flashinfer_workspace.h"
@@ -100,6 +101,23 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
   if (FLAGS_enable_eplb) {
     eplb_executor_->eplb_execute(input.eplb_info);
   }
+
+  // Set mamba cache mode for linear attention layers (e.g., Qwen3-Next GDN)
+  const auto& model_args = context_.get_model_args();
+  MambaCacheMode mamba_cache_mode = ParseMambaCacheMode(options_.mamba_cache_mode());
+  if (mamba_cache_mode == MambaCacheMode::kNone) {
+    mamba_cache_mode = ParseMambaCacheMode(model_args.mamba_cache_mode());
+  }
+  if (mamba_cache_mode == MambaCacheMode::kNone && options_.enable_prefix_cache()) {
+    mamba_cache_mode = MambaCacheMode::kAlign;
+  }
+  const_cast<ModelInputParams*>(&(input.input_params))->mamba_cache_mode = mamba_cache_mode;
+  int32_t mamba_block_size = model_args.mamba_block_size();
+  if (mamba_block_size == 0 && options_.enable_prefix_cache()) {
+    mamba_block_size = options_.block_size();
+  }
+  const_cast<ModelInputParams*>(&(input.input_params))->mamba_block_size =
+      mamba_block_size;
 
   // temporarily use [0], will be adapted in next pr
   // call model executor forward to get hidden states

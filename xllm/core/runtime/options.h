@@ -56,6 +56,12 @@ struct Options {
   // enable prefix cache
   PROPERTY(bool, enable_prefix_cache) = true;
 
+  // mamba cache mode for linear attention layers (e.g., Qwen3-Next GDN)
+  // - "none": no caching for mamba states (default when prefix cache disabled)
+  // - "all": cache mamba states at all block boundaries
+  // - "align": cache mamba states only at aligned block boundaries
+  PROPERTY(std::string, mamba_cache_mode) = "none";
+
   // number of decoding tokens per sequence
   // in speculative decoding, it is the number of speculative tokens + 1
   PROPERTY(int64_t, num_decoding_tokens) = 1;

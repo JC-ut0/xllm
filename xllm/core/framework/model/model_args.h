@@ -172,6 +172,14 @@ struct ModelArgs {
   PROPERTY(int32_t, shared_expert_intermediate_size) = 512;
   PROPERTY(float, partial_rotary_factor) = 0.25f;
 
+  // mamba cache mode for linear attention layers (e.g., Qwen3-Next GDN)
+  // - "none": no caching for mamba states (default when prefix cache disabled)
+  // - "all": cache mamba states at all block boundaries
+  // - "align": cache mamba states only at aligned block boundaries
+  PROPERTY(std::string, mamba_cache_mode) = "none";
+  PROPERTY(int32_t, mamba_block_size) = 0;
+  PROPERTY(bool, supports_mamba_prefix_caching) = false;
+
   // Vision model's dropout
   PROPERTY(float, mm_dropout) = 0.0f;
 
@@ -615,6 +623,9 @@ inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
   os << ", max_shift: " << args.max_shift();
   os << ", base_image_seq_len: " << args.base_image_seq_len();
   os << ", max_image_seq_len: " << args.max_image_seq_len();
+  os << ", mamba_cache_mode: " << args.mamba_cache_mode();
+  os << ", mamba_block_size: " << args.mamba_block_size();
+  os << ", supports_mamba_prefix_caching: " << args.supports_mamba_prefix_caching();
   os << "]";
   return os;
 }

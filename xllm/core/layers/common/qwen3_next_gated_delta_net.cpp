@@ -12,10 +12,13 @@ limitations under the License.
 
 #include "qwen3_next_gated_delta_net.h"
 
-#include <acl/acl.h>
 #include <glog/logging.h>
 #include <torch/torch.h>
+
+#if defined(USE_NPU)
+#include <acl/acl.h>
 #include <torch_npu/torch_npu.h>
+#endif
 
 #include <tuple>
 #include <unordered_map>
@@ -263,6 +266,8 @@ Qwen3NextGatedDeltaNetImpl::Qwen3NextGatedDeltaNetImpl(
   k_size_ = num_k_heads_ * head_k_dim_;
   v_size_ = num_v_heads_ * head_v_dim_;
   conv_kernel_size_ = args.linear_conv_kernel_dim();
+  mamba_cache_mode_ = ParseMambaCacheMode(args.mamba_cache_mode());
+  mamba_block_size_ = args.mamba_block_size();
   // 0. QKVZ parallel linear
   conv1d_ = register_module("conv1d",
                             ColumnParallelLinear(args.linear_conv_kernel_dim(),
@@ -320,6 +325,13 @@ torch::Tensor Qwen3NextGatedDeltaNetImpl::forward(
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     const ModelInputParams& input_params) {
+  if (input_params.mamba_cache_mode != mamba_cache_mode_) {
+    mamba_cache_mode_ = input_params.mamba_cache_mode;
+  }
+  if (input_params.mamba_block_size != mamba_block_size_ && input_params.mamba_block_size > 0) {
+    mamba_block_size_ = input_params.mamba_block_size;
+  }
+  
   auto qkvz = qkvz_proj_->forward(hidden_states);
   auto qkvz_reshaped = reshape_qkvz_with_pad(attn_metadata, qkvz);
   auto [q, k, v, z] = process_qkvz_tensor(qkvz_reshaped);
@@ -359,8 +371,20 @@ torch::Tensor Qwen3NextGatedDeltaNetImpl::forward(
             ? mixed_qkv.narrow(
                   -1, seq_len - conv_kernel_size_ + 1, conv_kernel_size_ - 1)
             : mixed_qkv;
-    conv_cache.index_put_({input_params.block_tables.select(1, 0)},
-                          conv_state.to(conv_cache.dtype()));
+    
+    bool should_save_conv_state = false;
+    if (mamba_cache_mode_ == MambaCacheMode::kAlign) {
+      if (mamba_block_size_ > 0 && seq_len % mamba_block_size_ == 0) {
+        should_save_conv_state = true;
+      }
+    } else if (mamba_cache_mode_ == MambaCacheMode::kAll) {
+      should_save_conv_state = true;
+    }
+    
+    if (should_save_conv_state || mamba_cache_mode_ == MambaCacheMode::kNone) {
+      conv_cache.index_put_({input_params.block_tables.select(1, 0)},
+                            conv_state.to(conv_cache.dtype()));
+    }
     torch::Tensor bias;
     auto conv_output =
         torch::conv1d(mixed_qkv,
@@ -412,8 +436,20 @@ torch::Tensor Qwen3NextGatedDeltaNetImpl::forward(
     std::tie(core_attn_out, last_recurrent_state) =
         torch_chunk_gated_delta_rule(
             processed_q, processed_k, processed_v, g, beta);
-    ssm_cache.index_put_({input_params.block_tables.select(1, 0)},
-                         last_recurrent_state.to(ssm_cache.dtype()));
+    
+    bool should_save_state = false;
+    if (mamba_cache_mode_ == MambaCacheMode::kAlign) {
+      if (mamba_block_size_ > 0 && seq_len % mamba_block_size_ == 0) {
+        should_save_state = true;
+      }
+    } else if (mamba_cache_mode_ == MambaCacheMode::kAll) {
+      should_save_state = true;
+    }
+    
+    if (should_save_state) {
+      ssm_cache.index_put_({input_params.block_tables.select(1, 0)},
+                           last_recurrent_state.to(ssm_cache.dtype()));
+    }
   } else {
     auto ssm_state = torch::index_select(
         ssm_cache, 0, attn_metadata.block_table.select(1, 0));

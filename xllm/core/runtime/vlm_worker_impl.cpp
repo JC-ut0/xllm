@@ -28,6 +28,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
+#include "framework/prefix_cache/mamba_cache_manager.h"
 #include "framework/state_dict/state_dict.h"
 #include "models/model_registry.h"
 #include "util/threadpool.h"
@@ -56,6 +57,22 @@ bool VLMWorkerImpl::init_model(ModelContext& context) {
 
 std::optional<ForwardOutput> VLMWorkerImpl::step(const ForwardInput& input) {
   Timer timer;
+  // Set mamba cache mode for linear attention layers (e.g., Qwen3-Next GDN)
+  const auto& model_args = context_.get_model_args();
+  MambaCacheMode mamba_cache_mode = ParseMambaCacheMode(options_.mamba_cache_mode());
+  if (mamba_cache_mode == MambaCacheMode::kNone) {
+    mamba_cache_mode = ParseMambaCacheMode(model_args.mamba_cache_mode());
+  }
+  if (mamba_cache_mode == MambaCacheMode::kNone && options_.enable_prefix_cache()) {
+    mamba_cache_mode = MambaCacheMode::kAlign;
+  }
+  const_cast<ModelInputParams*>(&(input.input_params))->mamba_cache_mode = mamba_cache_mode;
+  int32_t mamba_block_size = model_args.mamba_block_size();
+  if (mamba_block_size == 0 && options_.enable_prefix_cache()) {
+    mamba_block_size = options_.block_size();
+  }
+  const_cast<ModelInputParams*>(&(input.input_params))->mamba_block_size =
+      mamba_block_size;
   // TODO guojinrong, to adapt multi stream parallel later
   // call model executor forward to get hidden states
   auto model_output = model_executor_->forward(

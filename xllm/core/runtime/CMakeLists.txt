@@ -75,6 +75,7 @@ cc_library(
     :util
     :worker_service
     :xllm_server
+    :prefix_cache
     $<$<BOOL:${USE_NPU}>:xllm_ops>
     $<$<BOOL:${USE_NPU}>:atb_customize>
     $<$<BOOL:${USE_NPU}>:platform_npu>

@@ -334,6 +334,11 @@ REGISTER_MODEL_ARGS(qwen3_next, [&] {
   LOAD_ARG_OR(
       shared_expert_intermediate_size, "shared_expert_intermediate_size", 512);
 
+  // Mamba cache mode for prefix caching support
+  LOAD_ARG_OR(mamba_cache_mode, "mamba_cache_mode", "none");
+  LOAD_ARG_OR(mamba_block_size, "mamba_block_size", 0);
+  LOAD_ARG_OR(supports_mamba_prefix_caching, "supports_mamba_prefix_caching", false);
+
   // MoE compatibility with fused_moe implementation.
   LOAD_ARG_OR(n_routed_experts, "n_routed_experts", args->num_experts());
   SET_ARG(n_shared_experts,
