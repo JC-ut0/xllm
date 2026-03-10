@@ -49,6 +49,8 @@ DECLARE_double(max_memory_utilization);
 
 DECLARE_bool(enable_prefix_cache);
 
+DECLARE_string(mamba_cache_mode);
+
 DECLARE_bool(enable_cache_upload);
 
 DECLARE_uint32(murmur_hash3_seed);

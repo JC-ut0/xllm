@@ -262,6 +262,12 @@ DEFINE_bool(enable_prefix_cache,
             true,
             "Whether to enable the prefix cache for the block manager.");
 
+DEFINE_string(mamba_cache_mode,
+              "none",
+              "Mamba cache mode for linear attention layers (e.g., Qwen3-Next GDN). "
+              "Options: 'none' (no caching), 'all' (cache at all block boundaries), "
+              "'align' (cache only at aligned positions). Default is 'none'.");
+
 DEFINE_bool(enable_cache_upload,
             false,
             "Whether to upload cache info to service. This feature is only "
