@@ -19,6 +19,7 @@ class LLM:
         max_cache_size: int = 0,
         max_memory_utilization: float = 0.9,
         disable_prefix_cache: bool = False,
+        mamba_cache_mode: str = "none",
         max_tokens_per_batch: int = 20480,
         max_seqs_per_batch: int = 256,
         max_tokens_per_chunk_for_prefill: int = -1,
@@ -69,6 +70,7 @@ class LLM:
             options.enable_prefix_cache = False
         else:
             options.enable_prefix_cache = True
+        options.mamba_cache_mode = mamba_cache_mode
         options.max_tokens_per_batch = max_tokens_per_batch
         options.max_seqs_per_batch = max_seqs_per_batch
         options.max_tokens_per_chunk_for_prefill = max_tokens_per_chunk_for_prefill
