@@ -376,6 +376,9 @@ torch::Tensor Qwen3NextGatedDeltaNetImpl::forward(
     if (mamba_cache_mode_ == MambaCacheMode::kAlign) {
       if (mamba_block_size_ > 0 && seq_len % mamba_block_size_ == 0) {
         should_save_conv_state = true;
+        LOG(INFO) << "[GDN::forward] prefill seq_len=" << seq_len
+                  << " aligned to block_size=" << mamba_block_size_
+                  << ", saving conv state";
       }
     } else if (mamba_cache_mode_ == MambaCacheMode::kAll) {
       should_save_conv_state = true;
@@ -441,6 +444,9 @@ torch::Tensor Qwen3NextGatedDeltaNetImpl::forward(
     if (mamba_cache_mode_ == MambaCacheMode::kAlign) {
       if (mamba_block_size_ > 0 && seq_len % mamba_block_size_ == 0) {
         should_save_state = true;
+        LOG(INFO) << "[GDN::forward] prefill seq_len=" << seq_len
+                  << " aligned to block_size=" << mamba_block_size_
+                  << ", saving SSM state";
       }
     } else if (mamba_cache_mode_ == MambaCacheMode::kAll) {
       should_save_state = true;

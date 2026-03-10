@@ -61,6 +61,8 @@ std::vector<Block> PrefixCache::match(
   // allign tokens to block boundary
   const size_t n_tokens = round_down(token_ids.size(), block_size_);
   if (n_tokens == 0) {
+    LOG(INFO) << "[PrefixCache::match] n_tokens=0, token_ids.size()="
+              << token_ids.size() << ", block_size_=" << block_size_;
     return std::vector<Block>();
   }
 
@@ -115,6 +117,10 @@ std::vector<Block> PrefixCache::match(
   HISTOGRAM_OBSERVE(prefix_cache_block_matched_rate, int_rate_percent);
   HISTOGRAM_OBSERVE(prefix_cache_block_matched_num, blocks.size());
 
+  LOG(INFO) << "[PrefixCache::match] matched " << blocks.size()
+            << " blocks out of " << n_blocks << " ("
+            << int_rate_percent << "%), total cached blocks: " << num_blocks_;
+
   return blocks;
 }
 
@@ -151,6 +157,9 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
   const size_t n_tokens = n_blocks * block_size_;
 
   if (n_blocks == 0) {
+    LOG(INFO) << "[PrefixCache::insert] n_blocks=0, token_ids.size()="
+              << token_ids.size() << ", blocks.size()=" << blocks.size()
+              << ", block_size_=" << block_size_;
     return 0;
   }
   CHECK_GE(n_blocks, existed_shared_blocks_num);
@@ -165,6 +174,7 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
 
   uint32_t block_idx = existed_shared_blocks_num;
   insert_keys->reserve(n_blocks);
+  size_t new_inserted = 0;
   for (size_t i = existed_shared_blocks_num * block_size_; i < n_tokens;
        i += block_size_) {
     if (i == 0) {
@@ -196,6 +206,7 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
       num_blocks_++;
 
       insert_keys->emplace_back(token_hash_key.data);
+      new_inserted++;
     }
 
     ++block_idx;
@@ -205,6 +216,9 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
     Node* node = node_list.pop_front();
     lru_lst_.push_back(node);
   }
+
+  LOG(INFO) << "[PrefixCache::insert] inserted " << new_inserted
+            << " new blocks, total cached blocks: " << num_blocks_;
 
   return n_tokens;
 }

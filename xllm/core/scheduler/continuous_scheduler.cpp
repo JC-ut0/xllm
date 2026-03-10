@@ -429,6 +429,9 @@ void ContinuousScheduler::handle_decode_requests(
       }
 
       if (sequence->if_cache_block_for_prefill()) {
+        LOG(INFO) << "[ContinuousScheduler::handle_decode_requests] "
+                  << "seq_id=" << sequence->seq_id()
+                  << " calling cache (if_cache_block_for_prefill=true)";
         kv_cache_manager_->cache(sequence.get());
       }
 

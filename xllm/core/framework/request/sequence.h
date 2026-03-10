@@ -195,6 +195,11 @@ class Sequence final {
   bool if_cache_block_for_prefill() {
     bool if_cache =
         !is_cache_block_for_prefill_ && num_tokens() > num_prompt_tokens();
+    if (if_cache) {
+      LOG(INFO) << "[Sequence::if_cache_block_for_prefill] seq_id=" << seq_id_
+                << " will cache: num_tokens=" << num_tokens()
+                << ", num_prompt_tokens=" << num_prompt_tokens();
+    }
     is_cache_block_for_prefill_ |= if_cache;
     return if_cache;
   }

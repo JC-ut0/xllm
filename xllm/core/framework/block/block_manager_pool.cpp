@@ -252,6 +252,10 @@ void BlockManagerPool::allocate_shared(Sequence* sequence) {
     std::vector<Block> shared_blocks =
         block_managers_[dp_rank]->allocate_shared(sequence->tokens(),
                                                   existed_shared_blocks);
+    LOG(INFO) << "[BlockManagerPool::allocate_shared] seq_id=" << sequence->seq_id()
+              << ", tokens=" << sequence->tokens().size()
+              << ", existed_shared=" << existed_shared_blocks.size()
+              << ", matched=" << shared_blocks.size();
     sequence->add_shared_kv_blocks(std::move(shared_blocks));
   }
 }
@@ -261,6 +265,10 @@ void BlockManagerPool::cache(Sequence* sequence) {
   const auto token_ids = sequence->cached_tokens();
   auto* blocks = sequence->kv_state().mutable_kv_blocks();
   auto existed_shared_blocks_num = sequence->kv_state().shared_kv_blocks_num();
+  LOG(INFO) << "[BlockManagerPool::cache] seq_id=" << sequence->seq_id()
+            << ", cached_tokens=" << token_ids.size()
+            << ", blocks=" << blocks->size()
+            << ", existed_shared=" << existed_shared_blocks_num;
   block_managers_[dp_rank]->cache(
       token_ids, *blocks, existed_shared_blocks_num);
 }

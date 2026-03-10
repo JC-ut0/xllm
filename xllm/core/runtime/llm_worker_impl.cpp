@@ -126,6 +126,12 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
   const_cast<ModelInputParams*>(&(input.input_params))->mamba_block_size =
       mamba_block_size;
 
+  LOG(INFO) << "[LLMWorkerImpl::step] mamba_cache_mode="
+            << MambaCacheModeToString(mamba_cache_mode)
+            << ", mamba_block_size=" << mamba_block_size
+            << ", enable_prefix_cache=" << options_.enable_prefix_cache()
+            << ", is_prefill=" << input.input_params.is_prefill;
+
   // temporarily use [0], will be adapted in next pr
   // call model executor forward to get hidden states
   auto model_output = model_executor_->forward(
