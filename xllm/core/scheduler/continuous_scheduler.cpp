@@ -186,6 +186,8 @@ void ContinuousScheduler::handle_prefill_requests(
   // they may contian many sequences, so we should check here.
   bool budget_exhausted = false;
   bool blocks_exhausted = false;
+  LOG(INFO) << "[ContinuousScheduler::handle_prefill_requests] waiting_queue_size="
+            << waiting_priority_queue.size();
   while (!waiting_priority_queue.empty() && remaining_seq_budget > 0 &&
          remaining_token_budget > 0 && latency_budget > estimate_latency) {
     if (!options_.enable_disagg_pd() &&
@@ -196,6 +198,12 @@ void ContinuousScheduler::handle_prefill_requests(
     }
 
     std::shared_ptr<Request> request(waiting_priority_queue.top());
+    LOG(INFO) << "[ContinuousScheduler::handle_prefill_requests] processing request_id="
+              << request->request_id()
+              << ", num_sequences=" << request->sequences().size()
+              << ", num_tokens=" << request->sequences()[0]->num_tokens()
+              << ", kv_cache_tokens=" << request->sequences()[0]->kv_state().kv_cache_tokens_num()
+              << ", num_kv_blocks=" << request->sequences()[0]->kv_state().num_kv_blocks();
     if (request->finished() || request->cancelled()) {
       kv_cache_manager_->deallocate(request.get());
       // release the ownership of the request
@@ -640,6 +648,12 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
   // read from request queue then push to waiting priority queue
   while (request_queue_.read(request)) {
     CHECK(request);
+
+    LOG(INFO) << "[ContinuousScheduler::prepare_batch] new request request_id="
+              << request->request_id()
+              << ", kv_cache_tokens_num=" 
+              << request->sequences()[0]->kv_state().kv_cache_tokens_num()
+              << ", num_tokens=" << request->sequences()[0]->num_tokens();
 
     // expand sequences to the target number if prefix cache is disabled.
     if (!enable_prefix_cache_) {
