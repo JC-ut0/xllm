@@ -20,6 +20,7 @@ limitations under the License.
 
 #include "block_manager.h"
 #include "framework/block/kv_cache_manager.h"
+#include "framework/prefix_cache/mamba_cache_manager.h"
 
 namespace xllm {
 
@@ -33,6 +34,8 @@ class BlockManagerPool : public KVCacheManager {
     PROPERTY(bool, enable_disagg_pd) = false;
     PROPERTY(bool, enable_cache_upload) = false;
     PROPERTY(bool, enable_kvcache_store) = false;
+    PROPERTY(MambaCacheMode, mamba_cache_mode) = MambaCacheMode::kNone;
+    PROPERTY(int32_t, mamba_block_size) = 0;
   };
 
   explicit BlockManagerPool(const Options& options, int32_t dp_size = 1);

@@ -105,16 +105,11 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
   // Set mamba cache mode for linear attention layers (e.g., Qwen3-Next GDN)
   const auto& model_args = context_.get_model_args();
   MambaCacheMode mamba_cache_mode = ParseMambaCacheMode(options_.mamba_cache_mode());
-  LOG(INFO) << "MambaCacheMode from options: " << options_.mamba_cache_mode()
-            << ", parsed: " << static_cast<int>(mamba_cache_mode);
   if (mamba_cache_mode == MambaCacheMode::kNone) {
     mamba_cache_mode = ParseMambaCacheMode(model_args.mamba_cache_mode());
-    LOG(INFO) << "MambaCacheMode from model_args: " << model_args.mamba_cache_mode()
-              << ", parsed: " << static_cast<int>(mamba_cache_mode);
   }
   if (mamba_cache_mode == MambaCacheMode::kNone && options_.enable_prefix_cache()) {
     mamba_cache_mode = MambaCacheMode::kAlign;
-    LOG(INFO) << "MambaCacheMode auto-set to align due to prefix_cache enabled";
   }
   // Check if model supports 'all' mode, fallback to 'align' if not supported
   if (mamba_cache_mode == MambaCacheMode::kAll && 

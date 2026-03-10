@@ -92,8 +92,6 @@ Master::Master(const Options& options, EngineType type) : options_(options) {
       DeviceNameUtils::parse_devices(options_.devices().value_or("auto"));
   LOG(INFO) << "Creating engine with devices: "
             << DeviceNameUtils::to_string(devices);
-  LOG(INFO) << "Master mamba_cache_mode: " << options_.mamba_cache_mode()
-            << ", enable_prefix_cache: " << options_.enable_prefix_cache();
 
   if (options_.enable_disagg_pd()) {
     // Enable service routing in disagg pd mode

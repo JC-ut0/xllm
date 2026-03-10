@@ -135,9 +135,9 @@ void ChunkedPrefillScheduler::handle_running_queue_requests(
       // prefix cache blocks and compute prefix cache match to estimate latency
       // before acctually allocating blocks
 
-      // if (sequence->if_cache_block_for_prefill()) {
-      //   kv_cache_manager_->cache(sequence.get());
-      // }
+      if (sequence->if_cache_block_for_prefill()) {
+        kv_cache_manager_->cache(sequence.get());
+      }
 
       // the new request do chunked prefill
       if (sequence->kv_state().kv_cache_tokens_num() == 0 ||
