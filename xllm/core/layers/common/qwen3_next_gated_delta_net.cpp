@@ -415,11 +415,22 @@ torch::Tensor Qwen3NextGatedDeltaNetImpl::forward(
     ssm_cache.index_put_({input_params.block_tables.select(1, 0)},
                          last_recurrent_state.to(ssm_cache.dtype()));
   } else {
+    xllm::kernel::FusedRecurrentGatedDeltaRuleParams recurrent_params;
+    recurrent_params.q = processed_q.squeeze(1);
+    recurrent_params.k = processed_k.squeeze(1);
+    recurrent_params.v = processed_v.squeeze(1);
+    recurrent_params.g = g.squeeze(1);
+    recurrent_params.beta = beta.squeeze(1);
+    float scale_val = 1.0f / std::sqrt(static_cast<float>(head_k_dim_));
+    recurrent_params.scale = scale_val;
     auto ssm_state = torch::index_select(
         ssm_cache, 0, attn_metadata.block_table.select(1, 0));
+    recurrent_params.initial_state = ssm_state;
+    recurrent_params.inplace_final_state = false;
+    recurrent_params.use_qk_l2norm_in_kernel = true;
     std::tie(core_attn_out, last_recurrent_state) =
-        torch_recurrent_gated_delta_rule(
-            processed_q, processed_k, processed_v, g, beta, ssm_state);
+        xllm::kernel::fused_recurrent_gated_delta_rule(recurrent_params);
+    core_attn_out = core_attn_out.unsqueeze(1);
     ssm_cache.index_put_({attn_metadata.block_table.select(1, 0)},
                          last_recurrent_state.to(ssm_cache.dtype()));
   }
