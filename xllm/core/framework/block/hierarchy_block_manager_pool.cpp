@@ -17,6 +17,7 @@ limitations under the License.
 
 #include "block_manager_impl.h"
 #include "concurrent_block_manager_impl.h"
+#include "core/common/global_flags.h"
 
 namespace xllm {
 
@@ -200,6 +201,20 @@ void HierarchyBlockManagerPool::allocate_host_shared(Sequence* sequence) {
     int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
     std::vector<Block> shared_blocks =
         host_block_managers_[dp_rank]->allocate_shared(sequence->tokens());
+    // When chunked prefill is disabled, only allow full prefix match to avoid
+    // partial prefix cache causing chunked_prefill stage which is not supported
+    // by some backends (e.g., NPU_TORCH).
+    if (!FLAGS_enable_chunked_prefill && !shared_blocks.empty()) {
+      const size_t block_size = options_.block_size();
+      const size_t matched_tokens = shared_blocks.size() * block_size;
+      if (matched_tokens < sequence->num_tokens()) {
+        LOG(INFO) << "[HierarchyBlockManagerPool::allocate_host_shared] seq_id="
+                  << sequence->seq_id() << " partial prefix match ("
+                  << matched_tokens << "/" << sequence->num_tokens()
+                  << " tokens) discarded because chunked_prefill is disabled";
+        shared_blocks.clear();
+      }
+    }
     sequence->add_shared_host_kv_blocks(std::move(shared_blocks));
   }
 }
@@ -217,6 +232,20 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
     std::vector<Block> shared_blocks =
         host_block_managers_[dp_rank]->allocate_shared(
             prefill_sequence->tokens());
+    // When chunked prefill is disabled, only allow full prefix match to avoid
+    // partial prefix cache causing chunked_prefill stage which is not supported
+    // by some backends (e.g., NPU_TORCH).
+    if (!FLAGS_enable_chunked_prefill && !shared_blocks.empty()) {
+      const size_t block_size = options_.block_size();
+      const size_t matched_tokens = shared_blocks.size() * block_size;
+      if (matched_tokens < prefill_sequence->num_tokens()) {
+        LOG(INFO) << "[HierarchyBlockManagerPool::prefetch_from_storage] seq_id="
+                  << prefill_sequence->seq_id() << " partial prefix match ("
+                  << matched_tokens << "/" << prefill_sequence->num_tokens()
+                  << " tokens) discarded because chunked_prefill is disabled";
+        shared_blocks.clear();
+      }
+    }
     prefill_sequence->add_shared_host_kv_blocks(std::move(shared_blocks));
 
     // round down to the nearest block number

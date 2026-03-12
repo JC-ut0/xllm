@@ -22,10 +22,12 @@ limitations under the License.
 #include <optional>
 #include <queue>
 
+#ifndef GUARDED_BY
 #if __has_attribute(guarded_by)
 #define GUARDED_BY(x) __attribute__((guarded_by(x)))
 #else
 #define GUARDED_BY(x)
+#endif
 #endif
 
 namespace xllm {

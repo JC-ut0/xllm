@@ -19,6 +19,7 @@ limitations under the License.
 #include <filesystem>
 #include <vector>
 
+#include "core/common/global_flags.h"
 #include "core/framework/model_context.h"
 #include "core/layers/qwen3_next_decoder_layer.h"
 #include "llm_model_base.h"
@@ -194,6 +195,11 @@ TORCH_MODULE(Qwen3NextModel);
 class Qwen3NextForCausalLMImpl : public torch::nn::Module {
  public:
   Qwen3NextForCausalLMImpl(const ModelContext& context) {
+#if defined(USE_NPU) && defined(USE_NPU_TORCH)
+    CHECK(!FLAGS_enable_chunked_prefill)
+        << "qwen3_next have not supported "
+           "enable_chunked_prefill yet. Please disable it.";
+#endif
     model_ = register_module("model", Qwen3NextModel(context));
 #if defined(USE_NPU) && defined(USE_NPU_TORCH)
     lm_head_ = register_module("lm_head", layer::LmHead(context));

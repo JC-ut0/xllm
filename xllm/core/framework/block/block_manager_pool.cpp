@@ -17,6 +17,7 @@ limitations under the License.
 
 #include "block_manager_impl.h"
 #include "concurrent_block_manager_impl.h"
+#include "core/common/global_flags.h"
 
 namespace xllm {
 
@@ -262,6 +263,19 @@ void BlockManagerPool::allocate_shared(Sequence* sequence) {
               << ", tokens=" << sequence->tokens().size()
               << ", existed_shared=" << existed_shared_blocks.size()
               << ", matched=" << shared_blocks.size();
+    // When chunked prefill is disabled, only allow full prefix match to avoid
+    // partial prefix cache causing chunked_prefill stage which is not supported
+    // by some backends (e.g., NPU_TORCH).
+    if (!FLAGS_enable_chunked_prefill && !shared_blocks.empty()) {
+      const size_t block_size = options_.block_size();
+      const size_t matched_tokens = shared_blocks.size() * block_size;
+      if (matched_tokens < sequence->num_tokens()) {
+        LOG(INFO) << "[BlockManagerPool::allocate_shared] seq_id=" << sequence->seq_id()
+                  << " partial prefix match (" << matched_tokens << "/" << sequence->num_tokens()
+                  << " tokens) discarded because chunked_prefill is disabled";
+        shared_blocks.clear();
+      }
+    }
     sequence->add_shared_kv_blocks(std::move(shared_blocks));
   }
 }
