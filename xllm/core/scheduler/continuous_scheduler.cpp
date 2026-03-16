@@ -130,6 +130,14 @@ ContinuousScheduler::ContinuousScheduler(Engine* engine, const Options& options)
   } else {
     min_speculative_tokens_required_ = options_.num_speculative_tokens();
   }
+
+  // Initialize linear attention cache slots pool: [0, max_seqs_per_batch)
+  const int32_t max_linear_slots = std::max(options_.max_seqs_per_batch(), 0);
+  free_linear_cache_slots_.reserve(max_linear_slots);
+  // push in reverse so that we pop the smallest slot id first (optional)
+  for (int32_t slot = max_linear_slots - 1; slot >= 0; --slot) {
+    free_linear_cache_slots_.push_back(slot);
+  }
 }
 
 ContinuousScheduler::~ContinuousScheduler() { running_requests_.clear(); }
@@ -168,6 +176,34 @@ void ContinuousScheduler::create_running_queue(const Options& options) {
     running_queue_offline_ =
         std::make_unique<DynamicPriorityQueue>(std::move(comparator));
   }
+}
+
+int32_t ContinuousScheduler::allocate_linear_cache_slot(Sequence* seq) {
+  CHECK(seq != nullptr);
+  // Already assigned: reuse existing slot
+  if (seq->linear_cache_slot() >= 0) {
+    return seq->linear_cache_slot();
+  }
+  // Allocate a new slot from pool
+  CHECK(!free_linear_cache_slots_.empty())
+      << "No free linear attention cache slots available. "
+      << "Consider increasing max_seqs_per_batch.";
+  int32_t slot = free_linear_cache_slots_.back();
+  free_linear_cache_slots_.pop_back();
+  seq->set_linear_cache_slot(slot);
+  return slot;
+}
+
+void ContinuousScheduler::release_linear_cache_slot(Sequence* seq) {
+  if (seq == nullptr) {
+    return;
+  }
+  const int32_t slot = seq->linear_cache_slot();
+  if (slot < 0) {
+    return;
+  }
+  free_linear_cache_slots_.push_back(slot);
+  seq->set_linear_cache_slot(-1);
 }
 
 bool ContinuousScheduler::check_if_enough_to_evict(
@@ -810,6 +846,10 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
     std::shared_ptr<Request> request = *it;
     request->update_connection_status();
     if (request->finished() || request->cancelled()) {
+      // release linear attention cache slots held by all sequences of request
+      for (auto& seq : request->sequences()) {
+        release_linear_cache_slot(seq.get());
+      }
       kv_cache_manager_->deallocate(request.get());
       // release the ownership of the request
       finished_requests.emplace_back(request);
@@ -943,6 +983,11 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
                            num_online_prefill_preempt_offline_requests;
   if (!finished_requests.empty()) {
     response_processor_->process_completed_requests(finished_requests);
+  }
+
+  // Ensure each running sequence has a stable linear attention cache slot
+  for (auto* seq : running_sequences_) {
+    allocate_linear_cache_slot(seq);
   }
 
   auto batches =

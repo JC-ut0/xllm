@@ -522,17 +522,15 @@ bool LLMEngine::allocate_kv_cache(const Engine::KVCacheCapacity& kv_cache_cap) {
         kv_cache_cap.n_blocks, block_size, 1, args_.index_head_dim()});
   }
   if (enable_linear_attention) {
-    kv_cache_shape.emplace_back(std::vector<int64_t>{
-        kv_cache_cap.n_blocks,
+      int32_t linear_cache_n_blocks = options_.max_seqs_per_batch();
+      kv_cache_shape.emplace_back(std::vector<int64_t>{
+        linear_cache_n_blocks,
         args_.linear_key_head_dim() * n_local_linear_k_heads_ * 2 +
-            args_.linear_key_head_dim() * n_local_linear_v_heads_,
-        args_.linear_conv_kernel_dim() - 1});
-    kv_cache_shape.emplace_back(
-        std::vector<int64_t>{kv_cache_cap.n_blocks,
-                             n_local_linear_v_heads_,
-                             args_.linear_key_head_dim(),
-                             args_.linear_value_head_dim()});
-  }
+        args_.linear_key_head_dim() * n_local_linear_v_heads_,  args_.linear_conv_kernel_dim() - 1});
+      kv_cache_shape.emplace_back(std::vector<int64_t>{
+        linear_cache_n_blocks,  n_local_linear_v_heads_, args_.linear_key_head_dim(),
+         args_.linear_value_head_dim()});
+    }
 #if defined(USE_MLU)
   // transpose kv_cache layout for mlu
   // default layout: [n_blocks, block_size, n_head, head_dim]

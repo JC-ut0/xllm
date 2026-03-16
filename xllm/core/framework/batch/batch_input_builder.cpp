@@ -527,6 +527,21 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
   input_params.block_tables =
       create_2d_tensor(state_.block_tables_vec, torch::kInt);
 
+  // Setup linear cache indices (sequence indices for conv/ssm cache)
+  std::vector<int32_t> linear_cache_indices_vec;
+  linear_cache_indices_vec.reserve(state_.block_tables_vec.size());
+  for (int32_t i = 0; i < static_cast<int32_t>(state_.block_tables_vec.size());
+       ++i) {
+    CHECK_LT(i, static_cast<int32_t>(sequences_.size()))
+        << "block_tables_vec size must not exceed sequences_.size()";
+    int32_t slot = sequences_[i]->linear_cache_slot();
+    CHECK_GE(slot, 0) << "linear_cache_slot must be assigned before building "
+                      << "ForwardInput. Did scheduler forget to allocate it?";
+    linear_cache_indices_vec.push_back(slot);
+  }
+  input_params.linear_cache_indices =
+      torch::tensor(linear_cache_indices_vec, torch::kInt);
+
   if (input_embeddings_vec_.size() != 0) {
     input_params.input_embedding = torch::cat(input_embeddings_vec_);
   }

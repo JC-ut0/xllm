@@ -322,6 +322,7 @@ struct ModelInputParams {
 
     params.new_cache_slots = safe_to(new_cache_slots, device, true);
     params.block_tables = safe_to(block_tables, device, true);
+    params.linear_cache_indices = safe_to(linear_cache_indices, device, true);
     params.kv_seq_lens_vec = kv_seq_lens_vec;
     params.q_seq_lens_vec = q_seq_lens_vec;
 
@@ -398,6 +399,7 @@ struct ModelInputParams {
     print_tensor(q_cu_seq_lens, "ModelInputParams: q_cu_seq_lens", 4);
     print_tensor(new_cache_slots, "ModelInputParams: new_cache_slots", 4);
     print_tensor(block_tables, "ModelInputParams: block_tables", 4);
+    print_tensor(linear_cache_indices, "ModelInputParams: linear_cache_indices", 4);
     LOG(INFO) << "ModelInputParams: dp_global_token_nums is "
               << dp_global_token_nums << ", dp_is_decode: " << dp_is_decode;
 
@@ -459,6 +461,10 @@ struct ModelInputParams {
 
   // IntTensor: [n_seq, max_n_blocks]
   torch::Tensor block_tables;
+
+  // sequence indices for linear attention cache (conv cache and ssm cache)
+  // IntTensor: [n_seq]
+  torch::Tensor linear_cache_indices;
 
   // the indptr of the paged kv-cache
   // used in flashinfer

@@ -327,6 +327,14 @@ class ContinuousScheduler : public Scheduler {
   void update_memory_metrics(std::vector<Sequence*>& sequences);
 
   void create_running_queue(const Options& options);
+
+  // linear attention cache (conv/ssm) slot management
+  // We keep at most options_.max_seqs_per_batch() active slots
+  int32_t allocate_linear_cache_slot(Sequence* seq);
+  void release_linear_cache_slot(Sequence* seq);
+
+  // free slot ids pool, each in range [0, max_seqs_per_batch)
+  std::vector<int32_t> free_linear_cache_slots_;
 };
 
 }  // namespace xllm

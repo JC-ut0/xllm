@@ -330,6 +330,10 @@ class Sequence final {
   // get sequence id
   int32_t seq_id() const { return seq_id_; }
 
+  // set/get linear attention cache slot id (for conv/ssm cache)
+  void set_linear_cache_slot(int32_t slot) { linear_cache_slot_ = slot; }
+  int32_t linear_cache_slot() const { return linear_cache_slot_; }
+
   const std::vector<int32_t>& encoder_tokens() const {
     static const std::vector<int32_t> kEmpty;
     if (!onerec_state_.has_value()) {
@@ -473,6 +477,10 @@ class Sequence final {
 
   // seq id in the batch
   int32_t seq_id_ = -1;
+
+  // slot id in linear attention cache (conv/ssm cache), managed by scheduler
+  // -1 means unassigned
+  int32_t linear_cache_slot_ = -1;
 
   // for enable_schedule_overlap case
   uint32_t cur_generated_token_idx_;
