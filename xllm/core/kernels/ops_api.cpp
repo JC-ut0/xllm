@@ -19,6 +19,7 @@ limitations under the License.
 #include "mlu/mlu_ops_api.h"
 #elif defined(USE_NPU)
 #include "npu/npu_ops_api.h"
+#include "npu/xllm_ops/xllm_ops_api.h"
 #elif defined(USE_CUDA)
 #include "cuda/attention_runner.h"
 #include "cuda/cuda_ops_api.h"
@@ -957,6 +958,22 @@ torch::Tensor causal_conv1d_update(CausalConv1dUpdateParams& params) {
                                        params.intermediate_conv_window,
                                        params.pad_slot_id,
                                        params.validate_data);
+#else
+  NOT_IMPLEMENTED();
+#endif
+}
+
+torch::Tensor causal_conv1d_fn(CausalConv1dFnParams& params) {
+#if defined(USE_NPU)
+  return npu::causal_conv1d_fn(params.x,
+                               params.weight,
+                               params.bias,
+                               params.activation_mode,
+                               params.conv_state,
+                               params.has_initial_state,
+                               params.cache_indices,
+                               params.query_start_loc,
+                               params.pad_slot_id);
 #else
   NOT_IMPLEMENTED();
 #endif

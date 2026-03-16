@@ -1,0 +1,344 @@
+warning: in the working copy of 'CMakeLists.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/design/qwen3_next_causal_conv1d_fn_design.md', LF will be replaced by CRLF the next time Git touches it
+ docs/design/qwen3_next_causal_conv1d_fn_design.md  | 541 [32m+++++++++++++++++++++[m
+ third_party/torch_npu_ops                          |   2 [32m+[m[31m-[m
+ third_party/xllm_ops                               |   0
+ xllm/core/kernels/npu/xllm_ops/CMakeLists.txt      |   1 [32m+[m
+ .../core/kernels/npu/xllm_ops/causal_conv1d_fn.cpp | 130 [32m+++++[m
+ xllm/core/kernels/npu/xllm_ops/xllm_ops_api.h      |  11 [32m+[m
+ xllm/core/kernels/ops_api.cpp                      |  17 [32m+[m
+ xllm/core/kernels/ops_api.h                        |   2 [32m+[m
+ xllm/core/kernels/param.h                          |  25 [32m+[m[31m-[m
+ .../layers/common/qwen3_next_gated_delta_net.cpp   |  22 [32m+[m[31m-[m
+ 10 files changed, 748 insertions(+), 3 deletions(-)
+[1mdiff --git a/xllm/core/kernels/ops_api.cpp b/xllm/core/kernels/ops_api.cpp[m
+[1mindex 0106123..4273fa6 100644[m
+[1m--- a/xllm/core/kernels/ops_api.cpp[m
+[1m+++ b/xllm/core/kernels/ops_api.cpp[m
+[36m@@ -19,6 +19,7 @@[m [mlimitations under the License.[m
+ #include "mlu/mlu_ops_api.h"[m
+ #elif defined(USE_NPU)[m
+ #include "npu/npu_ops_api.h"[m
+[32m+[m[32m#include "npu/xllm_ops/xllm_ops_api.h"[m
+ #elif defined(USE_CUDA)[m
+ #include "cuda/attention_runner.h"[m
+ #include "cuda/cuda_ops_api.h"[m
+[36m@@ -962,6 +963,22 @@[m [mtorch::Tensor causal_conv1d_update(CausalConv1dUpdateParams& params) {[m
+ #endif[m
+ }[m
+ [m
+[32m+[m[32mtorch::Tensor causal_conv1d_fn(CausalConv1dFnParams& params) {[m
+[32m+[m[32m#if defined(USE_NPU)[m
+[32m+[m[32m  return npu::causal_conv1d_fn(params.x,[m
+[32m+[m[32m                               params.weight,[m
+[32m+[m[32m                               params.bias,[m
+[32m+[m[32m                               params.activation_mode,[m
+[32m+[m[32m                               params.conv_state,[m
+[32m+[m[32m                               params.has_initial_state,[m
+[32m+[m[32m                               params.cache_indices,[m
+[32m+[m[32m                               params.query_start_loc,[m
+[32m+[m[32m                               params.pad_slot_id);[m
+[32m+[m[32m#else[m
+[32m+[m[32m  NOT_IMPLEMENTED();[m
+[32m+[m[32m#endif[m
+[32m+[m[32m}[m
+[32m+[m
+ torch::Tensor gated_layer_norm(GatedLayerNormParams& params) {[m
+ #if defined(USE_NPU)[m
+   return npu::layer_norm_fwd(params.x,[m
+[1mdiff --git a/xllm/core/kernels/ops_api.h b/xllm/core/kernels/ops_api.h[m
+[1mindex c21b90e..6fd8d74 100644[m
+[1m--- a/xllm/core/kernels/ops_api.h[m
+[1m+++ b/xllm/core/kernels/ops_api.h[m
+[36m@@ -103,6 +103,8 @@[m [mstd::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule([m
+ [m
+ torch::Tensor causal_conv1d_update(CausalConv1dUpdateParams& params);[m
+ [m
+[32m+[m[32mtorch::Tensor causal_conv1d_fn(CausalConv1dFnParams& params);[m
+[32m+[m
+ torch::Tensor gated_layer_norm(GatedLayerNormParams& params);[m
+ [m
+ std::pair<torch::Tensor, torch::Tensor> partial_rotary_embedding([m
+[1mdiff --git a/xllm/core/kernels/param.h b/xllm/core/kernels/param.h[m
+[1mindex d5e6f8a..dbf452d 100644[m
+[1m--- a/xllm/core/kernels/param.h[m
+[1m+++ b/xllm/core/kernels/param.h[m
+[36m@@ -1339,7 +1339,7 @@[m [mstruct FusedRecurrentGatedDeltaRuleParams {[m
+   bool use_qk_l2norm_in_kernel = false;[m
+ };[m
+ [m
+[31m-// NPU Causal Conv1d Update parameters[m
+[32m+[m[32m// NPU Causal Conv1d Update parameters (for decode phase)[m
+ struct CausalConv1dUpdateParams {[m
+   torch::Tensor x;[m
+   torch::Tensor conv_state;[m
+[36m@@ -1356,6 +1356,29 @@[m [mstruct CausalConv1dUpdateParams {[m
+   bool validate_data = false;[m
+ };[m
+ [m
+[32m+[m[32m// NPU Causal Conv1d Fn parameters (for prefill phase)[m
+[32m+[m[32m// Based on vllm-ascend PR #6661: aclnnCausalConv1d[m
+[32m+[m[32mstruct CausalConv1dFnParams {[m
+[32m+[m[32m  // Input tensor [cu_seqlen, dim] or [batch, seq_len, dim][m
+[32m+[m[32m  torch::Tensor x;[m
+[32m+[m[32m  // Convolution weight [width, dim] (width=4 for qwen3-next)[m
+[32m+[m[32m  torch::Tensor weight;[m
+[32m+[m[32m  // Optional bias [dim][m
+[32m+[m[32m  std::optional<torch::Tensor> bias = std::nullopt;[m
+[32m+[m[32m  // Conv state cache [num_cache_lines, state_len, dim][m
+[32m+[m[32m  torch::Tensor conv_state;[m
+[32m+[m[32m  // Whether each sequence has initial state [batch][m
+[32m+[m[32m  torch::Tensor has_initial_state;[m
+[32m+[m[32m  // Cache indices for each sequence [batch][m
+[32m+[m[32m  torch::Tensor cache_indices;[m
+[32m+[m[32m  // Query start location [batch+1], cumulative sequence lengths[m
+[32m+[m[32m  torch::Tensor query_start_loc;[m
+[32m+[m[32m  // Activation mode: 0=none, 1=silu[m
+[32m+[m[32m  int64_t activation_mode = 1;[m
+[32m+[m[32m  // Pad slot id for invalid slots[m
+[32m+[m[32m  int64_t pad_slot_id = -1;[m
+[32m+[m[32m};[m
+[32m+[m
+ struct GatedLayerNormParams {[m
+   torch::Tensor x;[m
+   torch::Tensor weight;[m
+[1mdiff --git a/xllm/core/kernels/npu/xllm_ops/causal_conv1d_fn.cpp b/xllm/core/kernels/npu/xllm_ops/causal_conv1d_fn.cpp[m
+[1mnew file mode 100644[m
+[1mindex 0000000..336ca79[m
+[1m--- /dev/null[m
+[1m+++ b/xllm/core/kernels/npu/xllm_ops/causal_conv1d_fn.cpp[m
+[36m@@ -0,0 +1,130 @@[m
+[32m+[m[32m/* Copyright 2025 The xLLM Authors. All Rights Reserved.[m
+[32m+[m
+[32m+[m[32mLicensed under the Apache License, Version 2.0 (the "License");[m
+[32m+[m[32myou may not use this file except in compliance with the License.[m
+[32m+[m[32mYou may obtain a copy of the License at[m
+[32m+[m
+[32m+[m[32m    https://github.com/jd-opensource/xllm/blob/main/LICENSE[m
+[32m+[m
+[32m+[m[32mUnless required by applicable law or agreed to in writing, software[m
+[32m+[m[32mdistributed under the License is distributed on an "AS IS" BASIS,[m
+[32m+[m[32mWITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.[m
+[32m+[m[32mSee the License for the specific language governing permissions and[m
+[32m+[m[32mlimitations under the License.[m
+[32m+[m[32m==============================================================================*/[m
+[32m+[m
+[32m+[m[32m#include <c10/core/Device.h>[m
+[32m+[m[32m#include <glog/logging.h>[m
+[32m+[m[32m#include <torch/torch.h>[m
+[32m+[m[32m#include <torch_npu/csrc/libs/init_npu.h>[m
+[32m+[m[32m#include <torch_npu/torch_npu.h>[m
+[32m+[m
+[32m+[m[32m#ifdef TORCH_HIGHER_THAN_PTA6[m
+[32m+[m[32m#include <torch_npu/csrc/framework/OpCommand.h>[m
+[32m+[m[32m#else[m
+[32m+[m[32m#include <torch_npu/csrc/aten/NPUNativeFunctions.h>[m
+[32m+[m[32m#include <torch_npu/csrc/framework/utils/OpPreparation.h>[m
+[32m+[m[32m#endif[m
+[32m+[m
+[32m+[m[32m#include "acl/acl.h"[m
+[32m+[m[32m#include "aclnnop/aclnn_causal_conv1d.h"[m
+[32m+[m[32m#include "core/common/macros.h"[m
+[32m+[m[32m#include "core/kernels/npu/utils.h"[m
+[32m+[m[32m#include "xllm_ops_api.h"[m
+[32m+[m
+[32m+[m[32mnamespace xllm::kernel::npu {[m
+[32m+[m
+[32m+[m[32mtorch::Tensor causal_conv1d_fn([m
+[32m+[m[32m    const torch::Tensor& x,[m
+[32m+[m[32m    const torch::Tensor& weight,[m
+[32m+[m[32m    const c10::optional<torch::Tensor>& bias,[m
+[32m+[m[32m    int64_t activation_mode,[m
+[32m+[m[32m    torch::Tensor& conv_state,[m
+[32m+[m[32m    const torch::Tensor& has_initial_state,[m
+[32m+[m[32m    const torch::Tensor& cache_indices,[m
+[32m+[m[32m    const torch::Tensor& query_start_loc,[m
+[32m+[m[32m    int64_t pad_slot_id) {[m
+[32m+[m[32m  check_tensor(x, "x", "causal_conv1d_fn");[m
+[32m+[m[32m  check_tensor(weight, "weight", "causal_conv1d_fn");[m
+[32m+[m[32m  check_tensor(conv_state, "conv_state", "causal_conv1d_fn");[m
+[32m+[m[32m  check_tensor(has_initial_state, "has_initial_state", "causal_conv1d_fn");[m
+[32m+[m[32m  check_tensor(cache_indices, "cache_indices", "causal_conv1d_fn");[m
+[32m+[m[32m  check_tensor(query_start_loc, "query_start_loc", "causal_conv1d_fn");[m
+[32m+[m
+[32m+[m[32m  torch::Tensor output = at::empty(x.sizes(), x.options());[m
+[32m+[m
+[32m+[m[32m  int32_t device_id = x.device().index();[m
+[32m+[m[32m  aclrtStream stream = c10_npu::getCurrentNPUStream(device_id).stream();[m
+[32m+[m
+[32m+[m[32m  aclTensor* x_tensor = nullptr;[m
+[32m+[m[32m  aclTensor* weight_tensor = nullptr;[m
+[32m+[m[32m  aclTensor* bias_tensor = nullptr;[m
+[32m+[m[32m  aclTensor* conv_state_tensor = nullptr;[m
+[32m+[m[32m  aclTensor* has_initial_state_tensor = nullptr;[m
+[32m+[m[32m  aclTensor* cache_indices_tensor = nullptr;[m
+[32m+[m[32m  aclTensor* query_start_loc_tensor = nullptr;[m
+[32m+[m[32m  aclTensor* output_tensor = nullptr;[m
+[32m+[m
+[32m+[m[32m  create_acltensor(&x_tensor, x);[m
+[32m+[m[32m  create_acltensor(&weight_tensor, weight);[m
+[32m+[m[32m  if (bias.has_value() && bias.value().defined()) {[m
+[32m+[m[32m    create_acltensor(&bias_tensor, bias.value());[m
+[32m+[m[32m  }[m
+[32m+[m[32m  create_acltensor(&conv_state_tensor, conv_state);[m
+[32m+[m[32m  create_acltensor(&has_initial_state_tensor, has_initial_state);[m
+[32m+[m[32m  create_acltensor(&cache_indices_tensor, cache_indices);[m
+[32m+[m[32m  create_acltensor(&query_start_loc_tensor, query_start_loc);[m
+[32m+[m[32m  create_acltensor(&output_tensor, output);[m
+[32m+[m
+[32m+[m[32m  uint64_t workspace_size = 0;[m
+[32m+[m[32m  aclOpExecutor* executor = nullptr;[m
+[32m+[m
+[32m+[m[32m  CHECK_ACL_SUCCESS([m
+[32m+[m[32m      aclnnCausalConv1dGetWorkspaceSize(x_tensor,[m
+[32m+[m[32m                                        weight_tensor,[m
+[32m+[m[32m                                        bias_tensor,[m
+[32m+[m[32m                                        conv_state_tensor,[m
+[32m+[m[32m                                        query_start_loc_tensor,[m
+[32m+[m[32m                                        cache_indices_tensor,[m
+[32m+[m[32m                                        has_initial_state_tensor,[m
+[32m+[m[32m                                        activation_mode,[m
+[32m+[m[32m                                        pad_slot_id,[m
+[32m+[m[32m                                        output_tensor,[m
+[32m+[m[32m                                        &workspace_size,[m
+[32m+[m[32m                                        &executor),[m
+[32m+[m[32m      "causal_conv1d_fn: failed to get workspace size");[m
+[32m+[m
+[32m+[m[32m  void* workspace_addr = nullptr;[m
+[32m+[m[32m  if (workspace_size > 0) {[m
+[32m+[m[32m    CHECK_ACL_SUCCESS([m
+[32m+[m[32m        aclrtMalloc(&workspace_addr, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST),[m
+[32m+[m[32m        "causal_conv1d_fn: failed to allocate workspace");[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m[32m  CHECK_ACL_SUCCESS([m
+[32m+[m[32m      aclnnCausalConv1d(workspace_addr, workspace_size, executor, stream),[m
+[32m+[m[32m      "causal_conv1d_fn: failed to execute");[m
+[32m+[m
+[32m+[m[32m  CHECK_ACL_SUCCESS(aclrtSynchronizeStream(stream),[m
+[32m+[m[32m                    "causal_conv1d_fn: failed to synchronize stream");[m
+[32m+[m
+[32m+[m[32m  aclDestroyTensor(x_tensor);[m
+[32m+[m[32m  aclDestroyTensor(weight_tensor);[m
+[32m+[m[32m  if (bias_tensor != nullptr) {[m
+[32m+[m[32m    aclDestroyTensor(bias_tensor);[m
+[32m+[m[32m  }[m
+[32m+[m[32m  aclDestroyTensor(conv_state_tensor);[m
+[32m+[m[32m  aclDestroyTensor(has_initial_state_tensor);[m
+[32m+[m[32m  aclDestroyTensor(cache_indices_tensor);[m
+[32m+[m[32m  aclDestroyTensor(query_start_loc_tensor);[m
+[32m+[m[32m  aclDestroyTensor(output_tensor);[m
+[32m+[m
+[32m+[m[32m  if (workspace_size > 0) {[m
+[32m+[m[32m    CHECK_ACL_SUCCESS(aclrtFree(workspace_addr),[m
+[32m+[m[32m                      "causal_conv1d_fn: failed to free workspace");[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m[32m  return output;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m}  // namespace xllm::kernel::npu[m
+[1mdiff --git a/xllm/core/kernels/npu/xllm_ops/xllm_ops_api.h b/xllm/core/kernels/npu/xllm_ops/xllm_ops_api.h[m
+[1mindex eba93a2..5ed6416 100644[m
+[1m--- a/xllm/core/kernels/npu/xllm_ops/xllm_ops_api.h[m
+[1m+++ b/xllm/core/kernels/npu/xllm_ops/xllm_ops_api.h[m
+[36m@@ -32,4 +32,15 @@[m [mvoid top_k_top_p(torch::Tensor& logits,[m
+ [m
+ void replace_token(torch::Tensor& dst, torch::Tensor& src);[m
+ [m
+[32m+[m[32mtorch::Tensor causal_conv1d_fn([m
+[32m+[m[32m    const torch::Tensor& x,[m
+[32m+[m[32m    const torch::Tensor& weight,[m
+[32m+[m[32m    const c10::optional<torch::Tensor>& bias,[m
+[32m+[m[32m    int64_t activation_mode,[m
+[32m+[m[32m    torch::Tensor& conv_state,[m
+[32m+[m[32m    const torch::Tensor& has_initial_state,[m
+[32m+[m[32m    const torch::Tensor& cache_indices,[m
+[32m+[m[32m    const torch::Tensor& query_start_loc,[m
+[32m+[m[32m    int64_t pad_slot_id);[m
+[32m+[m
+ }  // namespace xllm::kernel::npu[m
+[1mdiff --git a/xllm/core/layers/common/qwen3_next_gated_delta_net.cpp b/xllm/core/layers/common/qwen3_next_gated_delta_net.cpp[m
+[1mindex b6e450e..7e41ce5 100644[m
+[1m--- a/xllm/core/layers/common/qwen3_next_gated_delta_net.cpp[m
+[1m+++ b/xllm/core/layers/common/qwen3_next_gated_delta_net.cpp[m
+[36m@@ -352,6 +352,26 @@[m [mtorch::Tensor Qwen3NextGatedDeltaNetImpl::forward([m
+   auto conv_weight = conv1d_->weight();[m
+ [m
+   if (attn_metadata.is_prefill) {[m
+[32m+[m[32m#if defined(USE_NPU)[m
+[32m+[m[32m    xllm::kernel::CausalConv1dFnParams conv_params;[m
+[32m+[m[41m    [m
+[32m+[m[32m    torch::Tensor mixed_qkv_transposed = mixed_qkv.transpose(1, 2).contiguous();[m
+[32m+[m[32m    int64_t batch = mixed_qkv_transposed.size(0);[m
+[32m+[m[32m    int64_t dim = mixed_qkv_transposed.size(2);[m
+[32m+[m[41m    [m
+[32m+[m[32m    conv_params.x = mixed_qkv_transposed.view({-1, dim});[m
+[32m+[m[32m    conv_params.weight = conv_weight.transpose(0, 1).contiguous();[m
+[32m+[m[32m    conv_params.bias = std::nullopt;[m
+[32m+[m[32m    conv_params.conv_state = conv_cache;[m
+[32m+[m[32m    conv_params.has_initial_state = torch::zeros({batch}, torch::kBool).to(device);[m
+[32m+[m[32m    conv_params.cache_indices = input_params.block_tables.select(1, 0);[m
+[32m+[m[32m    conv_params.query_start_loc = attn_metadata.q_cu_seq_lens;[m
+[32m+[m[32m    conv_params.activation_mode = 1;[m
+[32m+[m[32m    conv_params.pad_slot_id = -1;[m
+[32m+[m[41m    [m
+[32m+[m[32m    auto conv_output = xllm::kernel::causal_conv1d_fn(conv_params);[m
+[32m+[m[32m    mixed_qkv = conv_output.view({batch, seq_len, dim}).transpose(1, 2).contiguous();[m
+[32m+[m[32m#else[m
+     torch::Tensor conv_state =[m
+         (seq_len < conv_kernel_size_ - 1)[m
+             ? torch::pad(mixed_qkv, {0, conv_kernel_size_ - 1 - seq_len})[m
+[36m@@ -371,7 +391,7 @@[m [mtorch::Tensor Qwen3NextGatedDeltaNetImpl::forward([m
+                       /*dilation=*/std::vector<int64_t>{1},[m
+                       /*groups=*/static_cast<int64_t>(mixed_qkv.size(1)));[m
+     mixed_qkv = torch::silu(conv_output.slice(2, 0, seq_len));[m
+[31m-[m
+[32m+[m[32m#endif[m
+   } else {[m
+     xllm::kernel::CausalConv1dUpdateParams params;[m
+     params.x = mixed_qkv;[m
+
+                   SSUUMMMMAARRYY OOFF LLEESSSS CCOOMMMMAANNDDSS
+
+      Commands marked with * may be preceded by a number, _N.
+      Notes in parentheses indicate the behavior if _N is given.
+      A key preceded by a caret indicates the Ctrl key; thus ^K is ctrl-K.
+
+  h  H                 Display this help.
+  q  :q  Q  :Q  ZZ     Exit.
+ ---------------------------------------------------------------------------
+
+                           MMOOVVIINNGG
+
+  e  ^E  j  ^N  CR  *  Forward  one line   (or _N lines).
+  y  ^Y  k  ^K  ^P  *  Backward one line   (or _N lines).
+  f  ^F  ^V  SPACE  *  Forward  one window (or _N lines).
+  b  ^B  ESC-v      *  Backward one window (or _N lines).
+  z                 *  Forward  one window (and set window to _N).
+  w                 *  Backward one window (and set window to _N).
+  ESC-SPACE         *  Forward  one window, but don't stop at end-of-file.
+  d  ^D             *  Forward  one half-window (and set half-window to _N).
+  u  ^U             *  Backward one half-window (and set half-window to _N).
+  ESC-)  RightArrow *  Right one half screen width (or _N positions).
+  ESC-(  LeftArrow  *  Left  one half screen width (or _N positions).
+  ESC-}  ^RightArrow   Right to last column displayed.
+  ESC-{  ^LeftArrow    Left  to first column.
+  F                    Forward forever; like "tail -f".
+  ESC-F                Like F but stop when search pattern is found.
+  r  ^R  ^L            Repaint screen.
+  R                    Repaint screen, discarding buffered input.
+        ---------------------------------------------------
+        Default "window" is the screen height.
+        Default "half-window" is half of the screen height.
+ ---------------------------------------------------------------------------
+
+                          SSEEAARRCCHHIINNGG
+
+  /_p_a_t_t_e_r_n          *  Search forward for (_N-th) matching line.
+  ?_p_a_t_t_e_r_n          *  Search backward for (_N-th) matching line.
+  n                 *  Repeat previous search (for _N-th occurrence).
+  N                 *  Repeat previous search in reverse direction.
+  ESC-n             *  Repeat previous search, spanning files.
+  ESC-N             *  Repeat previous search, reverse dir. & spanning files.
+  ESC-u                Undo (toggle) search highlighting.

@@ -11,6 +11,7 @@ cc_library(
     top_k_top_p.cpp
     ../utils.cpp
     beam_search.cpp
+    causal_conv1d_fn.cpp
   DEPS
     atb
     torch_npu

@@ -32,4 +32,15 @@ void top_k_top_p(torch::Tensor& logits,
 
 void replace_token(torch::Tensor& dst, torch::Tensor& src);
 
+torch::Tensor causal_conv1d_fn(
+    const torch::Tensor& x,
+    const torch::Tensor& weight,
+    const c10::optional<torch::Tensor>& bias,
+    int64_t activation_mode,
+    torch::Tensor& conv_state,
+    const torch::Tensor& has_initial_state,
+    const torch::Tensor& cache_indices,
+    const torch::Tensor& query_start_loc,
+    int64_t pad_slot_id);
+
 }  // namespace xllm::kernel::npu

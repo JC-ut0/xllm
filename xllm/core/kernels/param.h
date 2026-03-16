@@ -1339,7 +1339,7 @@ struct FusedRecurrentGatedDeltaRuleParams {
   bool use_qk_l2norm_in_kernel = false;
 };
 
-// NPU Causal Conv1d Update parameters
+// NPU Causal Conv1d Update parameters (for decode phase)
 struct CausalConv1dUpdateParams {
   torch::Tensor x;
   torch::Tensor conv_state;
@@ -1354,6 +1354,29 @@ struct CausalConv1dUpdateParams {
   std::optional<torch::Tensor> intermediate_conv_window = std::nullopt;
   int32_t pad_slot_id = -1;
   bool validate_data = false;
+};
+
+// NPU Causal Conv1d Fn parameters (for prefill phase)
+// Based on vllm-ascend PR #6661: aclnnCausalConv1d
+struct CausalConv1dFnParams {
+  // Input tensor [cu_seqlen, dim] or [batch, seq_len, dim]
+  torch::Tensor x;
+  // Convolution weight [width, dim] (width=4 for qwen3-next)
+  torch::Tensor weight;
+  // Optional bias [dim]
+  std::optional<torch::Tensor> bias = std::nullopt;
+  // Conv state cache [num_cache_lines, state_len, dim]
+  torch::Tensor conv_state;
+  // Whether each sequence has initial state [batch]
+  torch::Tensor has_initial_state;
+  // Cache indices for each sequence [batch]
+  torch::Tensor cache_indices;
+  // Query start location [batch+1], cumulative sequence lengths
+  torch::Tensor query_start_loc;
+  // Activation mode: 0=none, 1=silu
+  int64_t activation_mode = 1;
+  // Pad slot id for invalid slots
+  int64_t pad_slot_id = -1;
 };
 
 struct GatedLayerNormParams {

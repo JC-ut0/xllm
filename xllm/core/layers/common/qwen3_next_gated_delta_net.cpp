@@ -352,6 +352,41 @@ torch::Tensor Qwen3NextGatedDeltaNetImpl::forward(
   auto conv_weight = conv1d_->weight();
 
   if (attn_metadata.is_prefill) {
+#if defined(USE_NPU)
+    xllm::kernel::CausalConv1dFnParams conv_params;
+    
+    torch::Tensor mixed_qkv_transposed = mixed_qkv.transpose(1, 2).contiguous();
+    int64_t batch = mixed_qkv_transposed.size(0);
+    int64_t dim = mixed_qkv_transposed.size(2);
+    
+    conv_params.x = mixed_qkv_transposed.view({-1, dim});
+    conv_params.weight = conv_weight.transpose(0, 1).contiguous();
+    conv_params.bias = std::nullopt;
+    conv_params.conv_state = conv_cache;
+    
+    // Initialize has_initial_state to all false (no sequence has initial state
+    // in prefill)
+    conv_params.has_initial_state = torch::zeros({batch}, torch::kBool).to(device);
+    
+    // Use block_tables first column as cache indices, with bounds checking
+    torch::Tensor cache_indices = input_params.block_tables.select(1, 0);
+    CHECK(cache_indices.defined()) << "block_tables must be defined for prefill";
+    CHECK(cache_indices.dim() == 1) << "cache_indices must be 1D, got "
+                                    << cache_indices.dim();
+    CHECK(cache_indices.size(0) == batch)
+        << "cache_indices size (" << cache_indices.size(0)
+        << ") must match batch size (" << batch << ")";
+    conv_params.cache_indices = cache_indices;
+    
+    conv_params.query_start_loc = attn_metadata.q_cu_seq_lens;
+    // Use named constant for activation mode (1 = silu)
+    constexpr int64_t kActivationSilu = 1;
+    conv_params.activation_mode = kActivationSilu;
+    conv_params.pad_slot_id = -1;
+    
+    auto conv_output = xllm::kernel::causal_conv1d_fn(conv_params);
+    mixed_qkv = conv_output.view({batch, seq_len, dim}).transpose(1, 2).contiguous();
+#else
     torch::Tensor conv_state =
         (seq_len < conv_kernel_size_ - 1)
             ? torch::pad(mixed_qkv, {0, conv_kernel_size_ - 1 - seq_len})
@@ -371,7 +406,7 @@ torch::Tensor Qwen3NextGatedDeltaNetImpl::forward(
                       /*dilation=*/std::vector<int64_t>{1},
                       /*groups=*/static_cast<int64_t>(mixed_qkv.size(1)));
     mixed_qkv = torch::silu(conv_output.slice(2, 0, seq_len));
-
+#endif
   } else {
     xllm::kernel::CausalConv1dUpdateParams params;
     params.x = mixed_qkv;
