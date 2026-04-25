@@ -649,6 +649,9 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
       compress_metadata;
   const int32_t layer_id = attn_metadata.layer_id;
   const auto rope_layer_dump_dir = make_rope_layer_dump_dir(tp_rank_, layer_id);
+  LOG(INFO) << "[DSV4][RoPE Dump] tp_rank=" << tp_rank_
+            << " tp_size=" << tp_size_ << " layer=" << layer_id
+            << " dump_dir=" << rope_layer_dump_dir;
 
   LOG(INFO) << "[DSV4][HeadDim][AttentionForward] layer=" << layer_id
             << " attention_head_dim=" << head_dim_
