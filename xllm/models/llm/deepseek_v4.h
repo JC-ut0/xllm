@@ -607,6 +607,31 @@ class DeepseekV4ModelImpl
       log_module_tensor("dsa_builder", "start_pos", dsa.start_pos);
       dump_module_tensor("dsa_builder", "start_pos", dsa.start_pos);
 
+      if (!dsa.block_tables.empty()) {
+        const auto& layer0_block_tables = dsa.block_tables[0];
+        for (size_t cache_idx = 0; cache_idx < layer0_block_tables.size();
+             ++cache_idx) {
+          const auto cache_name =
+              "block_table.cache_" + std::to_string(cache_idx);
+          log_module_tensor(
+              "dsa_layer0_tables", cache_name, layer0_block_tables[cache_idx]);
+          dump_module_tensor(
+              "dsa_layer0_tables", cache_name, layer0_block_tables[cache_idx]);
+        }
+      }
+      if (!dsa.slot_mappings.empty()) {
+        const auto& layer0_slot_mappings = dsa.slot_mappings[0];
+        for (size_t cache_idx = 0; cache_idx < layer0_slot_mappings.size();
+             ++cache_idx) {
+          const auto cache_name =
+              "slot_mapping.cache_" + std::to_string(cache_idx);
+          log_module_tensor(
+              "dsa_layer0_tables", cache_name, layer0_slot_mappings[cache_idx]);
+          dump_module_tensor(
+              "dsa_layer0_tables", cache_name, layer0_slot_mappings[cache_idx]);
+        }
+      }
+
       build_precomputed_metadata(dsa);
       log_module_tensor("precomputed_metadata", "c1_metadata", dsa.c1_metadata);
       log_module_tensor("precomputed_metadata", "c4_metadata", dsa.c4_metadata);
@@ -754,6 +779,31 @@ class DeepseekV4ModelImpl
     dsa.max_seqlen_q = maybe_to_device(dsa.max_seqlen_q, metadata_device);
     dsa.max_seqlen_kv = maybe_to_device(dsa.max_seqlen_kv, metadata_device);
 
+    const bool should_dump_layer0 = !layers_.empty();
+    const auto layer0_dump_dir =
+        should_dump_layer0 ? deepseek_v4_make_layer0_dump_dir(tp_rank_) : "";
+    auto log_dsa_input = [&](const std::string& tensor_name,
+                             const torch::Tensor& tensor) {
+      LOG(INFO) << "[DSV4][Node] file=deepseek_v4.h module=dsa_precompute_input"
+                << " tensor=" << tensor_name
+                << " shape=" << deepseek_v4_tensor_shape_string(tensor)
+                << " dtype_device="
+                << deepseek_v4_tensor_dtype_device_string(tensor);
+      if (should_dump_layer0) {
+        deepseek_v4_dump_module_tensor(layer0_dump_dir,
+                                       "deepseek_v4.h",
+                                       "dsa_precompute_input",
+                                       tensor_name,
+                                       tensor);
+      }
+    };
+    log_dsa_input("actual_seq_lengths_query", dsa.actual_seq_lengths_query);
+    log_dsa_input("actual_seq_lengths_kv", dsa.actual_seq_lengths_kv);
+    log_dsa_input("seq_lens_q", dsa.seq_lens_q);
+    log_dsa_input("seq_lens", dsa.seq_lens);
+    log_dsa_input("max_seqlen_q", dsa.max_seqlen_q);
+    log_dsa_input("max_seqlen_kv", dsa.max_seqlen_kv);
+
     if (!dsa.actual_seq_lengths_query.defined() ||
         !dsa.actual_seq_lengths_kv.defined()) {
       return;
@@ -874,6 +924,8 @@ class DeepseekV4ModelImpl
         query_lens.numel() == 0 || key_lens.numel() == 0) {
       return;
     }
+    log_dsa_input("query_lens", query_lens);
+    log_dsa_input("key_lens", key_lens);
 
     const int64_t global_index_num_heads =
         std::max<int64_t>(index_n_heads_ > 0 ? index_n_heads_ : num_heads_, 1);

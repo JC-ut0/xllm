@@ -205,6 +205,62 @@ void dump_rope_tensor(const std::string& layer_dir,
   }
 }
 
+void dump_rope_module_tensor(const std::string& layer_dir,
+                             const std::string& module_name,
+                             const std::string& tensor_name,
+                             const torch::Tensor& tensor) {
+  if (layer_dir.empty() || module_name.empty() || !tensor.defined()) {
+    return;
+  }
+  const auto module_dir = layer_dir + "/" + sanitize_dump_name(module_name);
+  try {
+    std::filesystem::create_directories(module_dir);
+  } catch (const std::filesystem::filesystem_error& e) {
+    LOG(WARNING) << "[DSV4][RoPE Dump] failed to create " << module_dir << ": "
+                 << e.what();
+    return;
+  }
+  const auto path = module_dir + "/" + sanitize_dump_name(tensor_name) + ".pt";
+  torch::Tensor out;
+  try {
+    out = dump_tensor_on_cpu(tensor);
+  } catch (const c10::Error& e) {
+    LOG(WARNING) << "[DSV4][RoPE Dump] failed to prepare " << path << ": "
+                 << e.what_without_backtrace();
+    return;
+  }
+  try {
+    save_tensor_as_pickle(out, path);
+  } catch (const c10::Error& e) {
+    LOG(WARNING) << "[DSV4][RoPE Dump] failed to save " << path << ": "
+                 << e.what_without_backtrace();
+  }
+}
+
+void dump_rope_module_text(const std::string& layer_dir,
+                           const std::string& module_name,
+                           const std::string& name,
+                           const std::string& text) {
+  if (layer_dir.empty() || module_name.empty()) {
+    return;
+  }
+  const auto module_dir = layer_dir + "/" + sanitize_dump_name(module_name);
+  try {
+    std::filesystem::create_directories(module_dir);
+  } catch (const std::filesystem::filesystem_error& e) {
+    LOG(WARNING) << "[DSV4][RoPE Dump] failed to create " << module_dir << ": "
+                 << e.what();
+    return;
+  }
+  const auto path = module_dir + "/" + sanitize_dump_name(name) + ".txt";
+  std::ofstream ofs(path, std::ios::out | std::ios::trunc);
+  if (!ofs) {
+    LOG(WARNING) << "[DSV4][RoPE Dump] failed to open " << path;
+    return;
+  }
+  ofs << text;
+}
+
 void dump_rope_text(const std::string& layer_dir,
                     const std::string& name,
                     const std::string& text) {
@@ -264,6 +320,7 @@ void dump_rope_call(const std::string& layer_dir,
     return;
   }
   const auto safe_stage = sanitize_dump_name(stage);
+  const auto rope_module_name = "rope_" + safe_stage;
   std::ostringstream meta;
   meta << "layer=" << layer_id << "\n"
        << "stage=" << stage << "\n"
@@ -280,11 +337,13 @@ void dump_rope_call(const std::string& layer_dir,
        << "output_shape=" << tensor_shape_string(input_after) << "\n"
        << "output_dtype_device=" << tensor_dtype_device_string(input_after)
        << "\n";
-  dump_rope_text(layer_dir, safe_stage + ".meta", meta.str());
-  dump_rope_tensor(layer_dir, safe_stage + ".input_before", input_before);
-  dump_rope_tensor(layer_dir, safe_stage + ".cos", cos);
-  dump_rope_tensor(layer_dir, safe_stage + ".sin", sin);
-  dump_rope_tensor(layer_dir, safe_stage + ".input_after", input_after);
+  dump_rope_module_text(layer_dir, rope_module_name, "meta", meta.str());
+  dump_rope_module_tensor(
+      layer_dir, rope_module_name, "input_before", input_before);
+  dump_rope_module_tensor(layer_dir, rope_module_name, "cos", cos);
+  dump_rope_module_tensor(layer_dir, rope_module_name, "sin", sin);
+  dump_rope_module_tensor(
+      layer_dir, rope_module_name, "input_after", input_after);
 }
 
 void apply_partial_rope(torch::Tensor& input,
@@ -664,6 +723,13 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
       dump_rope_tensor(rope_layer_dump_dir, node, tensor);
     }
   };
+  const auto dump_module_tensor = [&](const std::string& module_name,
+                                      const std::string& node,
+                                      const torch::Tensor& tensor) {
+    if (should_dump_layer0 && !rope_layer_dump_dir.empty()) {
+      dump_rope_module_tensor(rope_layer_dump_dir, module_name, node, tensor);
+    }
+  };
 
   LOG(INFO) << "[DSV4][HeadDim][AttentionForward] layer=" << layer_id
             << " attention_head_dim=" << head_dim_
@@ -742,6 +808,17 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   const int64_t compress_ratio_i = static_cast<int64_t>(compress_ratio_);
   DsaCacheMapping mapping =
       resolve_cache_mapping(attn_metadata, compress_ratio_i);
+  LOG(INFO) << "[DSV4][DSA][CacheMapping] layer=" << layer_id
+            << " compress_ratio=" << compress_ratio_i
+            << " cmp_cache_idx=" << mapping.cmp_cache_idx
+            << " index_cache_idx=" << mapping.index_cache_idx
+            << " indexer_scale_cache_idx=" << mapping.indexer_scale_cache_idx
+            << " ori_cache_idx=" << mapping.ori_cache_idx
+            << " kv_state_cache_idx=" << mapping.kv_state_cache_idx
+            << " score_state_cache_idx=" << mapping.score_state_cache_idx
+            << " index_kv_state_cache_idx=" << mapping.index_kv_state_cache_idx
+            << " index_score_state_cache_idx="
+            << mapping.index_score_state_cache_idx;
 
   auto cmp_block_table = get_layer_cache_tensor(attn_metadata.block_tables,
                                                 attn_metadata.layer_id,
@@ -777,6 +854,43 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   auto index_slot = get_layer_cache_tensor(attn_metadata.slot_mappings,
                                            attn_metadata.layer_id,
                                            mapping.index_cache_idx);
+  LOG(INFO) << "[DSV4][DSA][LayerInputs] layer=" << layer_id
+            << " cmp_block_table=" << tensor_shape_string(cmp_block_table)
+            << "/" << tensor_dtype_device_string(cmp_block_table)
+            << " ori_block_table=" << tensor_shape_string(ori_block_table)
+            << "/" << tensor_dtype_device_string(ori_block_table)
+            << " kv_block_table=" << tensor_shape_string(kv_block_table) << "/"
+            << tensor_dtype_device_string(kv_block_table)
+            << " score_block_table=" << tensor_shape_string(score_block_table)
+            << "/" << tensor_dtype_device_string(score_block_table)
+            << " index_kv_block_table="
+            << tensor_shape_string(index_kv_block_table) << "/"
+            << tensor_dtype_device_string(index_kv_block_table)
+            << " index_score_block_table="
+            << tensor_shape_string(index_score_block_table) << "/"
+            << tensor_dtype_device_string(index_score_block_table)
+            << " index_block_table=" << tensor_shape_string(index_block_table)
+            << "/" << tensor_dtype_device_string(index_block_table)
+            << " cmp_slot=" << tensor_shape_string(cmp_slot) << "/"
+            << tensor_dtype_device_string(cmp_slot)
+            << " ori_slot=" << tensor_shape_string(ori_slot) << "/"
+            << tensor_dtype_device_string(ori_slot)
+            << " index_slot=" << tensor_shape_string(index_slot) << "/"
+            << tensor_dtype_device_string(index_slot);
+  dump_module_tensor("dsa_layer_inputs", "cmp_block_table", cmp_block_table);
+  dump_module_tensor("dsa_layer_inputs", "ori_block_table", ori_block_table);
+  dump_module_tensor("dsa_layer_inputs", "kv_block_table", kv_block_table);
+  dump_module_tensor(
+      "dsa_layer_inputs", "score_block_table", score_block_table);
+  dump_module_tensor(
+      "dsa_layer_inputs", "index_kv_block_table", index_kv_block_table);
+  dump_module_tensor(
+      "dsa_layer_inputs", "index_score_block_table", index_score_block_table);
+  dump_module_tensor(
+      "dsa_layer_inputs", "index_block_table", index_block_table);
+  dump_module_tensor("dsa_layer_inputs", "cmp_slot", cmp_slot);
+  dump_module_tensor("dsa_layer_inputs", "ori_slot", ori_slot);
+  dump_module_tensor("dsa_layer_inputs", "index_slot", index_slot);
 
   auto ori_kv = std::get<0>(kv_state);
   if (!ori_kv.defined()) {
@@ -802,6 +916,25 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   if (!index_score_state.defined()) {
     index_score_state = kv_cache.get_compress_index_score_state();
   }
+  LOG(INFO) << "[DSV4][DSA][KVState] layer=" << layer_id
+            << " ori_kv=" << tensor_shape_string(ori_kv) << "/"
+            << tensor_dtype_device_string(ori_kv) << " compressor_kv_state="
+            << tensor_shape_string(compressor_kv_state) << "/"
+            << tensor_dtype_device_string(compressor_kv_state)
+            << " compressor_score_state="
+            << tensor_shape_string(compressor_score_state) << "/"
+            << tensor_dtype_device_string(compressor_score_state)
+            << " index_kv_state=" << tensor_shape_string(index_kv_state) << "/"
+            << tensor_dtype_device_string(index_kv_state)
+            << " index_score_state=" << tensor_shape_string(index_score_state)
+            << "/" << tensor_dtype_device_string(index_score_state);
+  dump_module_tensor("dsa_kv_state", "ori_kv", ori_kv);
+  dump_module_tensor(
+      "dsa_kv_state", "compressor_kv_state", compressor_kv_state);
+  dump_module_tensor(
+      "dsa_kv_state", "compressor_score_state", compressor_score_state);
+  dump_module_tensor("dsa_kv_state", "index_kv_state", index_kv_state);
+  dump_module_tensor("dsa_kv_state", "index_score_state", index_score_state);
 
   // 5) write ori kv cache
   scatter_by_slot(ori_kv, ori_slot, kv);
@@ -932,6 +1065,36 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   CHECK(sparse_metadata.has_value())
       << "DSAttention requires precomputed sparse metadata for compress_ratio="
       << compress_ratio_i;
+  LOG(INFO)
+      << "[DSV4][SparseAttn][Inputs] layer=" << layer_id
+      << " q=" << tensor_shape_string(q) << "/" << tensor_dtype_device_string(q)
+      << " ori_kv=" << tensor_shape_string(ori_kv) << "/"
+      << tensor_dtype_device_string(ori_kv)
+      << " cmp_kv=" << tensor_shape_string(cmp_kv) << "/"
+      << tensor_dtype_device_string(cmp_kv)
+      << " compress_topk_idxs=" << tensor_shape_string(compress_topk_idxs)
+      << "/" << tensor_dtype_device_string(compress_topk_idxs)
+      << " actual_seq_lengths_query="
+      << tensor_shape_string(attn_metadata.actual_seq_lengths_query) << "/"
+      << tensor_dtype_device_string(attn_metadata.actual_seq_lengths_query)
+      << " actual_seq_lengths_kv="
+      << tensor_shape_string(attn_metadata.actual_seq_lengths_kv) << "/"
+      << tensor_dtype_device_string(attn_metadata.actual_seq_lengths_kv)
+      << " sparse_metadata=" << tensor_shape_string(sparse_metadata.value())
+      << "/" << tensor_dtype_device_string(sparse_metadata.value());
+  dump_module_tensor("sparse_attn_inputs", "q", q);
+  dump_module_tensor("sparse_attn_inputs", "ori_kv", ori_kv);
+  dump_module_tensor("sparse_attn_inputs", "cmp_kv", cmp_kv);
+  dump_module_tensor(
+      "sparse_attn_inputs", "compress_topk_idxs", compress_topk_idxs);
+  dump_module_tensor("sparse_attn_inputs",
+                     "actual_seq_lengths_query",
+                     attn_metadata.actual_seq_lengths_query);
+  dump_module_tensor("sparse_attn_inputs",
+                     "actual_seq_lengths_kv",
+                     attn_metadata.actual_seq_lengths_kv);
+  dump_module_tensor(
+      "sparse_attn_inputs", "sparse_metadata", sparse_metadata.value());
 
   auto [attn_output, output_lse] = xllm::kernel::npu::sparse_attn_sharedkv(
       /*q=*/q,
