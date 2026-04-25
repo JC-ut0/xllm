@@ -224,13 +224,14 @@ void dump_rope_text(const std::string& layer_dir,
   ofs << text;
 }
 
-std::string make_rope_layer_dump_dir(int32_t layer_id) {
+std::string make_rope_layer_dump_dir(int64_t tp_rank, int32_t layer_id) {
   auto root = rope_dump_root();
   if (root.empty()) {
     return "";
   }
+  const auto tp_rank_name = "tp_rank_" + std::to_string(tp_rank);
   const auto layer_name = "layer_" + std::to_string(layer_id);
-  const auto layer_dir = root + "/" + layer_name;
+  const auto layer_dir = root + "/" + tp_rank_name + "/" + layer_name;
   try {
     std::filesystem::create_directories(layer_dir);
   } catch (const std::filesystem::filesystem_error& e) {
@@ -647,7 +648,7 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   auto [c1_metadata, c4_metadata, c128_metadata, qli_metadata] =
       compress_metadata;
   const int32_t layer_id = attn_metadata.layer_id;
-  const auto rope_layer_dump_dir = make_rope_layer_dump_dir(layer_id);
+  const auto rope_layer_dump_dir = make_rope_layer_dump_dir(tp_rank_, layer_id);
 
   LOG(INFO) << "[DSV4][HeadDim][AttentionForward] layer=" << layer_id
             << " attention_head_dim=" << head_dim_
