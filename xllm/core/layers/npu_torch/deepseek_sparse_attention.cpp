@@ -24,6 +24,7 @@ limitations under the License.
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -191,8 +192,16 @@ void dump_rope_tensor(const std::string& layer_dir,
     return;
   }
   const auto path = layer_dir + "/" + sanitize_dump_name(name) + ".pt";
+  torch::Tensor out;
   try {
-    torch::save(first_token_tensor(tensor), path);
+    out = first_token_tensor(tensor);
+  } catch (const c10::Error& e) {
+    LOG(WARNING) << "[DSV4][RoPE Dump] failed to prepare " << path << ": "
+                 << e.what_without_backtrace();
+    return;
+  }
+  try {
+    torch::save(out, path);
   } catch (const c10::Error& e) {
     LOG(WARNING) << "[DSV4][RoPE Dump] failed to save " << path << ": "
                  << e.what_without_backtrace();
