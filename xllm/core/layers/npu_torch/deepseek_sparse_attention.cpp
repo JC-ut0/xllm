@@ -648,10 +648,26 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   auto [c1_metadata, c4_metadata, c128_metadata, qli_metadata] =
       compress_metadata;
   const int32_t layer_id = attn_metadata.layer_id;
-  const auto rope_layer_dump_dir = make_rope_layer_dump_dir(tp_rank_, layer_id);
+  const bool should_dump_layer0 = (layer_id == 0);
+  const auto rope_layer_dump_dir =
+      should_dump_layer0 ? make_rope_layer_dump_dir(tp_rank_, layer_id) : "";
   LOG(INFO) << "[DSV4][RoPE Dump] tp_rank=" << tp_rank_
             << " tp_size=" << tp_size_ << " layer=" << layer_id
+            << " enabled=" << should_dump_layer0
             << " dump_dir=" << rope_layer_dump_dir;
+
+  const auto log_node_tensor = [&](const std::string& node,
+                                   const torch::Tensor& tensor) {
+    LOG(INFO) << "[DSV4][Node] layer=" << layer_id << " node=" << node
+              << " shape=" << tensor_shape_string(tensor)
+              << " dtype_device=" << tensor_dtype_device_string(tensor);
+  };
+  const auto dump_node_tensor = [&](const std::string& node,
+                                    const torch::Tensor& tensor) {
+    if (should_dump_layer0 && !rope_layer_dump_dir.empty()) {
+      dump_rope_tensor(rope_layer_dump_dir, node, tensor);
+    }
+  };
 
   LOG(INFO) << "[DSV4][HeadDim][AttentionForward] layer=" << layer_id
             << " attention_head_dim=" << head_dim_
@@ -661,11 +677,23 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
             << " hidden_states=" << tensor_shape_string(hidden_states)
             << " cos=" << tensor_shape_string(attn_metadata.cos)
             << " sin=" << tensor_shape_string(attn_metadata.sin);
+  log_node_tensor("hidden_states.input", hidden_states);
+  log_node_tensor("cos.input", attn_metadata.cos);
+  log_node_tensor("sin.input", attn_metadata.sin);
+  dump_node_tensor("hidden_states.input", hidden_states);
+  dump_node_tensor("cos.input", attn_metadata.cos);
+  dump_node_tensor("sin.input", attn_metadata.sin);
 
   // 1) q projection + q rmsnorm
   auto q_down = q_a_proj_->forward(hidden_states);
+  log_node_tensor("q_a_proj.output", q_down);
+  dump_node_tensor("q_a_proj.output", q_down);
   auto qr = std::get<0>(q_layernorm_->forward(q_down));
+  log_node_tensor("q_layernorm.output", qr);
+  dump_node_tensor("q_layernorm.output", qr);
   auto q = q_b_proj_->forward(qr).view({-1, n_local_heads_, head_dim_});
+  log_node_tensor("q_b_proj_reshape.output", q);
+  dump_node_tensor("q_b_proj_reshape.output", q);
 
   xllm::kernel::FusedLayerNormParams q_rmsnorm_params;
   q_rmsnorm_params.input = q;
@@ -674,11 +702,19 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   q_rmsnorm_params.eps = eps_;
   xllm::kernel::fused_layernorm(q_rmsnorm_params);
   q = q_rmsnorm_params.output;
+  log_node_tensor("q_rmsnorm.output", q);
+  dump_node_tensor("q_rmsnorm.output", q);
 
   // 2) kv projection
   auto kv_down = kv_proj_->forward(hidden_states);
+  log_node_tensor("kv_proj.output", kv_down);
+  dump_node_tensor("kv_proj.output", kv_down);
   auto kv = std::get<0>(kv_layernorm_->forward(kv_down));
+  log_node_tensor("kv_layernorm.output", kv);
+  dump_node_tensor("kv_layernorm.output", kv);
   kv = kv.view({-1, 1, qk_head_dim_});
+  log_node_tensor("kv_reshape.output", kv);
+  dump_node_tensor("kv_reshape.output", kv);
 
   // 3) RoPE (q and kv)
   auto cos = attn_metadata.cos;
@@ -692,6 +728,8 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                      layer_id,
                      "q_forward_rope",
                      rope_layer_dump_dir);
+  log_node_tensor("q_after_rope.output", q);
+  dump_node_tensor("q_after_rope.output", q);
   apply_partial_rope(kv,
                      nope_head_dim_,
                      rope_head_dim_,
@@ -701,6 +739,8 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                      layer_id,
                      "kv_forward_rope",
                      rope_layer_dump_dir);
+  log_node_tensor("kv_after_rope.output", kv);
+  dump_node_tensor("kv_after_rope.output", kv);
 
   // 4) resolve per-layer cache mapping
   const int64_t compress_ratio_i = static_cast<int64_t>(compress_ratio_);
@@ -925,9 +965,15 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
       /*layout_q=*/"TND",
       /*layout_kv=*/"PA_ND",
       /*return_softmax_lse=*/false);
+  log_node_tensor("sparse_attn.output", attn_output);
+  dump_node_tensor("sparse_attn.output", attn_output);
+  log_node_tensor("sparse_attn.lse", output_lse);
+  dump_node_tensor("sparse_attn.lse", output_lse);
 
   // 8) output RoPE + projection
   auto o = attn_output.view({-1, n_local_heads_, head_dim_});
+  log_node_tensor("o_reshape.input", o);
+  dump_node_tensor("o_reshape.input", o);
   apply_partial_rope(o,
                      nope_head_dim_,
                      rope_head_dim_,
@@ -937,12 +983,20 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                      layer_id,
                      "o_inverse_rope",
                      rope_layer_dump_dir);
+  log_node_tensor("o_after_inverse_rope.output", o);
+  dump_node_tensor("o_after_inverse_rope.output", o);
 
   const int64_t num_tokens = o.size(0);
   auto o_group = o.view({num_tokens, n_local_groups_, -1});
+  log_node_tensor("o_group.output", o_group);
+  dump_node_tensor("o_group.output", o_group);
   auto wo_a = o_a_proj_->weight().view({n_local_groups_, o_lora_rank_, -1});
   auto o_low_rank = torch::einsum("tgd,grd->tgr", {o_group, wo_a});
+  log_node_tensor("o_low_rank.output", o_low_rank);
+  dump_node_tensor("o_low_rank.output", o_low_rank);
   auto output = o_b_proj_->forward(o_low_rank.reshape({num_tokens, -1}));
+  log_node_tensor("o_b_proj.output", output);
+  dump_node_tensor("o_b_proj.output", output);
   std::optional<torch::Tensor> final_lse = std::nullopt;
   (void)output_lse;
 
