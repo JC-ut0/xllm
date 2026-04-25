@@ -32,6 +32,7 @@ limitations under the License.
 
 #include "kernels/ops_api.h"
 #include "xllm/core/kernels/npu/xllm_ops/xllm_ops_api.h"
+#include "xllm/core/util/tensor_helper.h"
 
 DECLARE_bool(enable_chunked_prefill);
 namespace xllm {
@@ -201,7 +202,7 @@ void dump_rope_tensor(const std::string& layer_dir,
     return;
   }
   try {
-    torch::save(out, path);
+    save_tensor_as_pickle(out, path);
   } catch (const c10::Error& e) {
     LOG(WARNING) << "[DSV4][RoPE Dump] failed to save " << path << ": "
                  << e.what_without_backtrace();
