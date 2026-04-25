@@ -146,17 +146,16 @@ inline std::string deepseek_v4_dump_root() {
   return "./xllm_deepseek_v4_rope_dump";
 }
 
-inline std::string deepseek_v4_make_model_dump_dir(int64_t tp_rank) {
+inline std::string deepseek_v4_make_layer0_dump_dir(int64_t tp_rank) {
   const auto root = deepseek_v4_dump_root();
   if (root.empty()) {
     return "";
   }
-  const auto dir = root + "/tp_rank_" + std::to_string(tp_rank) + "/model";
+  const auto dir = root + "/tp_rank_" + std::to_string(tp_rank) + "/layer_0";
   try {
     std::filesystem::create_directories(dir);
   } catch (const std::filesystem::filesystem_error& e) {
-    LOG(WARNING) << "[DSV4][Model Dump] failed to create " << dir << ": "
-                 << e.what();
+    LOG(WARNING) << "[DSV4][Dump] failed to create " << dir << ": " << e.what();
     return "";
   }
   return dir;
@@ -170,18 +169,30 @@ inline torch::Tensor deepseek_v4_dump_tensor_on_cpu(
   return tensor.contiguous().to(torch::kCPU);
 }
 
-inline void deepseek_v4_dump_tensor(const std::string& dump_dir,
-                                    const std::string& name,
-                                    const torch::Tensor& tensor) {
-  if (dump_dir.empty() || !tensor.defined()) {
+inline void deepseek_v4_dump_module_tensor(const std::string& layer0_dump_dir,
+                                           const std::string& module_file,
+                                           const std::string& module_name,
+                                           const std::string& tensor_name,
+                                           const torch::Tensor& tensor) {
+  if (layer0_dump_dir.empty() || !tensor.defined()) {
+    return;
+  }
+  const auto module_dir = layer0_dump_dir + "/" +
+                          deepseek_v4_sanitize_dump_name(module_file) + "/" +
+                          deepseek_v4_sanitize_dump_name(module_name);
+  try {
+    std::filesystem::create_directories(module_dir);
+  } catch (const std::filesystem::filesystem_error& e) {
+    LOG(WARNING) << "[DSV4][Dump] failed to create " << module_dir << ": "
+                 << e.what();
     return;
   }
   const auto path =
-      dump_dir + "/" + deepseek_v4_sanitize_dump_name(name) + ".pt";
+      module_dir + "/" + deepseek_v4_sanitize_dump_name(tensor_name) + ".pt";
   try {
     save_tensor_as_pickle(deepseek_v4_dump_tensor_on_cpu(tensor), path);
   } catch (const c10::Error& e) {
-    LOG(WARNING) << "[DSV4][Model Dump] failed to save " << path << ": "
+    LOG(WARNING) << "[DSV4][Dump] failed to save " << path << ": "
                  << e.what_without_backtrace();
   }
 }
@@ -398,24 +409,28 @@ class DeepseekV4ModelImpl
                       std::vector<KVCache>& kv_caches,
                       const ModelInputParams& input_params) override {
     const bool should_dump_layer0 = !layers_.empty();
-    const auto model_dump_dir =
-        should_dump_layer0 ? deepseek_v4_make_model_dump_dir(tp_rank_) : "";
-    const auto log_model_node = [&](const std::string& node,
-                                    const torch::Tensor& tensor) {
-      LOG(INFO) << "[DSV4][Model Node] node=" << node
+    const auto layer0_dump_dir =
+        should_dump_layer0 ? deepseek_v4_make_layer0_dump_dir(tp_rank_) : "";
+    const auto log_module_tensor = [&](const std::string& module,
+                                       const std::string& node,
+                                       const torch::Tensor& tensor) {
+      LOG(INFO) << "[DSV4][Node] file=deepseek_v4.h module=" << module
+                << " tensor=" << node
                 << " shape=" << deepseek_v4_tensor_shape_string(tensor)
                 << " dtype_device="
                 << deepseek_v4_tensor_dtype_device_string(tensor);
     };
-    const auto dump_model_node = [&](const std::string& node,
-                                     const torch::Tensor& tensor) {
+    const auto dump_module_tensor = [&](const std::string& module,
+                                        const std::string& node,
+                                        const torch::Tensor& tensor) {
       if (should_dump_layer0) {
-        deepseek_v4_dump_tensor(model_dump_dir, node, tensor);
+        deepseek_v4_dump_module_tensor(
+            layer0_dump_dir, "deepseek_v4.h", module, node, tensor);
       }
     };
-    LOG(INFO) << "[DSV4][Model Dump] tp_rank=" << tp_rank_
+    LOG(INFO) << "[DSV4][Dump] file=deepseek_v4.h tp_rank=" << tp_rank_
               << " enabled=" << should_dump_layer0
-              << " dump_dir=" << model_dump_dir;
+              << " dump_dir=" << layer0_dump_dir;
 
     if (tokens.numel() == 0) {
       tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
@@ -423,22 +438,22 @@ class DeepseekV4ModelImpl
     }
 
     auto inputs_embeds = input_params.input_embedding;
-    log_model_node("tokens.input", tokens);
-    log_model_node("positions.input", positions);
-    log_model_node("input_embedding.input", inputs_embeds);
-    dump_model_node("tokens.input", tokens);
-    dump_model_node("positions.input", positions);
-    dump_model_node("input_embedding.input", inputs_embeds);
+    log_module_tensor("model_input", "tokens.input", tokens);
+    log_module_tensor("model_input", "positions.input", positions);
+    log_module_tensor("model_input", "input_embedding.input", inputs_embeds);
+    dump_module_tensor("model_input", "tokens.input", tokens);
+    dump_module_tensor("model_input", "positions.input", positions);
+    dump_module_tensor("model_input", "input_embedding.input", inputs_embeds);
     torch::Tensor h =
         inputs_embeds.defined() ? inputs_embeds : embed_tokens_(tokens);
-    log_model_node("embed_tokens.output", h);
-    dump_model_node("embed_tokens.output", h);
+    log_module_tensor("embed_tokens", "output", h);
+    dump_module_tensor("embed_tokens", "output", h);
 
     if (h.dim() == 2) {
       h = h.unsqueeze(1).repeat({1, hc_mult_, 1});
     }
-    log_model_node("hidden_states.after_expand", h);
-    dump_model_node("hidden_states.after_expand", h);
+    log_module_tensor("hidden_expand", "output", h);
+    dump_module_tensor("hidden_expand", "output", h);
 
     // Keep runtime inputs on the same accelerator device.
     const auto runtime_device = h.device();
@@ -481,6 +496,30 @@ class DeepseekV4ModelImpl
           maybe_to_device(dsa.c4_pad_positions, runtime_device);
       dsa.c128_pad_positions =
           maybe_to_device(dsa.c128_pad_positions, runtime_device);
+      log_module_tensor("dsa_builder", "seq_lens", dsa.seq_lens);
+      log_module_tensor("dsa_builder", "seq_lens_q", dsa.seq_lens_q);
+      log_module_tensor("dsa_builder",
+                        "actual_seq_lengths_query",
+                        dsa.actual_seq_lengths_query);
+      log_module_tensor(
+          "dsa_builder", "actual_seq_lengths_kv", dsa.actual_seq_lengths_kv);
+      log_module_tensor("dsa_builder", "input_positions", dsa.input_positions);
+      log_module_tensor(
+          "dsa_builder", "c4_pad_positions", dsa.c4_pad_positions);
+      log_module_tensor(
+          "dsa_builder", "c128_pad_positions", dsa.c128_pad_positions);
+      dump_module_tensor("dsa_builder", "seq_lens", dsa.seq_lens);
+      dump_module_tensor("dsa_builder", "seq_lens_q", dsa.seq_lens_q);
+      dump_module_tensor("dsa_builder",
+                         "actual_seq_lengths_query",
+                         dsa.actual_seq_lengths_query);
+      dump_module_tensor(
+          "dsa_builder", "actual_seq_lengths_kv", dsa.actual_seq_lengths_kv);
+      dump_module_tensor("dsa_builder", "input_positions", dsa.input_positions);
+      dump_module_tensor(
+          "dsa_builder", "c4_pad_positions", dsa.c4_pad_positions);
+      dump_module_tensor(
+          "dsa_builder", "c128_pad_positions", dsa.c128_pad_positions);
 
       for (auto& layer_block_tables : dsa.block_tables) {
         for (auto& block_table : layer_block_tables) {
@@ -496,6 +535,8 @@ class DeepseekV4ModelImpl
       if (dsa_hadamard_.defined()) {
         dsa.hadamard = maybe_to_device(dsa_hadamard_, runtime_device);
       }
+      log_module_tensor("dsa_builder", "hadamard", dsa.hadamard);
+      dump_module_tensor("dsa_builder", "hadamard", dsa.hadamard);
 
       if (dsa_rotary_embedding_) {
         std::unordered_map<std::string, torch::Tensor> positions_map;
@@ -546,21 +587,41 @@ class DeepseekV4ModelImpl
           }
         }
       }
-      log_model_node("dsa.cos", dsa.cos);
-      log_model_node("dsa.sin", dsa.sin);
-      log_model_node("dsa.c4_cos", dsa.c4_cos);
-      log_model_node("dsa.c4_sin", dsa.c4_sin);
-      dump_model_node("dsa.cos", dsa.cos);
-      dump_model_node("dsa.sin", dsa.sin);
-      dump_model_node("dsa.c4_cos", dsa.c4_cos);
-      dump_model_node("dsa.c4_sin", dsa.c4_sin);
+      log_module_tensor("rotary_embedding", "cos", dsa.cos);
+      log_module_tensor("rotary_embedding", "sin", dsa.sin);
+      log_module_tensor("rotary_embedding", "c4_cos", dsa.c4_cos);
+      log_module_tensor("rotary_embedding", "c4_sin", dsa.c4_sin);
+      log_module_tensor("rotary_embedding", "c128_cos", dsa.c128_cos);
+      log_module_tensor("rotary_embedding", "c128_sin", dsa.c128_sin);
+      dump_module_tensor("rotary_embedding", "cos", dsa.cos);
+      dump_module_tensor("rotary_embedding", "sin", dsa.sin);
+      dump_module_tensor("rotary_embedding", "c4_cos", dsa.c4_cos);
+      dump_module_tensor("rotary_embedding", "c4_sin", dsa.c4_sin);
+      dump_module_tensor("rotary_embedding", "c128_cos", dsa.c128_cos);
+      dump_module_tensor("rotary_embedding", "c128_sin", dsa.c128_sin);
 
       if (dsa.actual_seq_lengths_kv.defined() && dsa.seq_lens_q.defined()) {
         dsa.start_pos =
             (dsa.actual_seq_lengths_kv - dsa.seq_lens_q).to(torch::kInt32);
       }
+      log_module_tensor("dsa_builder", "start_pos", dsa.start_pos);
+      dump_module_tensor("dsa_builder", "start_pos", dsa.start_pos);
 
       build_precomputed_metadata(dsa);
+      log_module_tensor("precomputed_metadata", "c1_metadata", dsa.c1_metadata);
+      log_module_tensor("precomputed_metadata", "c4_metadata", dsa.c4_metadata);
+      log_module_tensor(
+          "precomputed_metadata", "c128_metadata", dsa.c128_metadata);
+      log_module_tensor(
+          "precomputed_metadata", "qli_metadata", dsa.qli_metadata);
+      dump_module_tensor(
+          "precomputed_metadata", "c1_metadata", dsa.c1_metadata);
+      dump_module_tensor(
+          "precomputed_metadata", "c4_metadata", dsa.c4_metadata);
+      dump_module_tensor(
+          "precomputed_metadata", "c128_metadata", dsa.c128_metadata);
+      dump_module_tensor(
+          "precomputed_metadata", "qli_metadata", dsa.qli_metadata);
     }
 
     std::optional<torch::Tensor> residual;
@@ -599,18 +660,21 @@ class DeepseekV4ModelImpl
           }
         }
         if (layer_id == 0) {
-          log_model_node("layer0.block_table.input", attn_metadata.block_table);
-          log_model_node("layer0.slot_mapping.input",
-                         attn_metadata.slot_mapping);
-          dump_model_node("layer0.block_table.input",
-                          attn_metadata.block_table);
-          dump_model_node("layer0.slot_mapping.input",
-                          attn_metadata.slot_mapping);
+          log_module_tensor(
+              "layer0_router", "block_table.input", attn_metadata.block_table);
+          log_module_tensor("layer0_router",
+                            "slot_mapping.input",
+                            attn_metadata.slot_mapping);
+          dump_module_tensor(
+              "layer0_router", "block_table.input", attn_metadata.block_table);
+          dump_module_tensor("layer0_router",
+                             "slot_mapping.input",
+                             attn_metadata.slot_mapping);
         }
       }
       if (i == 0) {
-        log_model_node("layer0.hidden_states.input", h);
-        dump_model_node("layer0.hidden_states.input", h);
+        log_module_tensor("decoder_layer_0", "hidden_states.input", h);
+        dump_module_tensor("decoder_layer_0", "hidden_states.input", h);
       }
 
       h = layers_[i](h,
@@ -621,21 +685,23 @@ class DeepseekV4ModelImpl
                      modified_input_params,
                      tokens);
       if (i == 0) {
-        log_model_node("layer0.hidden_states.output", h);
-        dump_model_node("layer0.hidden_states.output", h);
+        log_module_tensor("decoder_layer_0", "hidden_states.output", h);
+        dump_module_tensor("decoder_layer_0", "hidden_states.output", h);
       }
     }
+    log_module_tensor("hc_head", "input", h);
+    dump_module_tensor("hc_head", "input", h);
     h = hc_head(h);
-    log_model_node("hc_head.output", h);
-    dump_model_node("hc_head.output", h);
+    log_module_tensor("hc_head", "output", h);
+    dump_module_tensor("hc_head", "output", h);
+    log_module_tensor("norm", "input", h);
+    dump_module_tensor("norm", "input", h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
-    log_model_node("norm.hidden_states.output", hidden_states);
-    log_model_node(
-        "norm.residual.output",
-        residual_out.has_value() ? residual_out.value() : torch::Tensor());
-    dump_model_node("norm.hidden_states.output", hidden_states);
+    log_module_tensor("norm", "hidden_states.output", hidden_states);
+    dump_module_tensor("norm", "hidden_states.output", hidden_states);
     if (residual_out.has_value()) {
-      dump_model_node("norm.residual.output", residual_out.value());
+      log_module_tensor("norm", "residual.output", residual_out.value());
+      dump_module_tensor("norm", "residual.output", residual_out.value());
     }
     return ModelOutput(hidden_states, residual_out);
   }
