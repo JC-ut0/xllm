@@ -22,6 +22,8 @@ limitations under the License.
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
 #include <iomanip>
 #include <limits>
 #include <memory>
@@ -38,6 +40,7 @@ limitations under the License.
 #include "core/layers/common/rms_norm.h"
 #include "core/layers/common/word_embedding.h"
 #include "core/layers/deepseek_v4_decoder_layer.h"
+#include "core/util/tensor_helper.h"
 #include "layers/npu/deepseek_v4_rotary_embedding.h"
 #include "llm_model_base.h"
 
@@ -94,6 +97,95 @@ inline torch::Tensor maybe_to_device(const torch::Tensor& tensor,
   return tensor.to(device);
 }
 
+inline std::string deepseek_v4_tensor_shape_string(
+    const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return "undefined";
+  }
+  std::ostringstream os;
+  os << "[";
+  for (int64_t i = 0; i < tensor.dim(); ++i) {
+    if (i > 0) {
+      os << ",";
+    }
+    os << tensor.size(i);
+  }
+  os << "]";
+  return os.str();
+}
+
+inline std::string deepseek_v4_tensor_dtype_device_string(
+    const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return "undefined";
+  }
+  std::ostringstream os;
+  os << tensor.scalar_type() << "," << tensor.device();
+  return os.str();
+}
+
+inline std::string deepseek_v4_sanitize_dump_name(std::string name) {
+  for (auto& ch : name) {
+    if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' ||
+          ch == '-' || ch == '.')) {
+      ch = '_';
+    }
+  }
+  return name;
+}
+
+inline std::string deepseek_v4_dump_root() {
+  const char* disabled = std::getenv("XLLM_DSV4_ROPE_DUMP_DISABLE");
+  if (disabled != nullptr && std::string(disabled) == "1") {
+    return "";
+  }
+  const char* root = std::getenv("XLLM_DSV4_ROPE_DUMP_DIR");
+  if (root != nullptr && root[0] != '\0') {
+    return root;
+  }
+  return "./xllm_deepseek_v4_rope_dump";
+}
+
+inline std::string deepseek_v4_make_model_dump_dir(int64_t tp_rank) {
+  const auto root = deepseek_v4_dump_root();
+  if (root.empty()) {
+    return "";
+  }
+  const auto dir = root + "/tp_rank_" + std::to_string(tp_rank) + "/model";
+  try {
+    std::filesystem::create_directories(dir);
+  } catch (const std::filesystem::filesystem_error& e) {
+    LOG(WARNING) << "[DSV4][Model Dump] failed to create " << dir << ": "
+                 << e.what();
+    return "";
+  }
+  return dir;
+}
+
+inline torch::Tensor deepseek_v4_dump_tensor_on_cpu(
+    const torch::Tensor& tensor) {
+  if (!tensor.defined() || tensor.numel() == 0) {
+    return torch::Tensor();
+  }
+  return tensor.contiguous().to(torch::kCPU);
+}
+
+inline void deepseek_v4_dump_tensor(const std::string& dump_dir,
+                                    const std::string& name,
+                                    const torch::Tensor& tensor) {
+  if (dump_dir.empty() || !tensor.defined()) {
+    return;
+  }
+  const auto path =
+      dump_dir + "/" + deepseek_v4_sanitize_dump_name(name) + ".pt";
+  try {
+    save_tensor_as_pickle(deepseek_v4_dump_tensor_on_cpu(tensor), path);
+  } catch (const c10::Error& e) {
+    LOG(WARNING) << "[DSV4][Model Dump] failed to save " << path << ": "
+                 << e.what_without_backtrace();
+  }
+}
+
 // Group key: (ratio, type, block_size) -> group_id
 struct DSAGroupKey {
   int32_t ratio;
@@ -147,6 +239,7 @@ class DeepseekV4ModelImpl
         std::max<int64_t>(parallel_args.world_size() /
                               std::max<int64_t>(parallel_args.dp_size(), 1),
                           1);
+    tp_rank_ = parallel_args.tp_group_->rank();
     CHECK_EQ(num_heads_ % dp_local_tp_size_, 0)
         << "[DSV4][Init] n_heads must be divisible by local tp size. n_heads="
         << num_heads_ << ", local_tp_size=" << dp_local_tp_size_
@@ -304,18 +397,48 @@ class DeepseekV4ModelImpl
                       torch::Tensor positions,
                       std::vector<KVCache>& kv_caches,
                       const ModelInputParams& input_params) override {
+    const bool should_dump_layer0 = !layers_.empty();
+    const auto model_dump_dir =
+        should_dump_layer0 ? deepseek_v4_make_model_dump_dir(tp_rank_) : "";
+    const auto log_model_node = [&](const std::string& node,
+                                    const torch::Tensor& tensor) {
+      LOG(INFO) << "[DSV4][Model Node] node=" << node
+                << " shape=" << deepseek_v4_tensor_shape_string(tensor)
+                << " dtype_device="
+                << deepseek_v4_tensor_dtype_device_string(tensor);
+    };
+    const auto dump_model_node = [&](const std::string& node,
+                                     const torch::Tensor& tensor) {
+      if (should_dump_layer0) {
+        deepseek_v4_dump_tensor(model_dump_dir, node, tensor);
+      }
+    };
+    LOG(INFO) << "[DSV4][Model Dump] tp_rank=" << tp_rank_
+              << " enabled=" << should_dump_layer0
+              << " dump_dir=" << model_dump_dir;
+
     if (tokens.numel() == 0) {
       tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
       positions = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
     }
 
     auto inputs_embeds = input_params.input_embedding;
+    log_model_node("tokens.input", tokens);
+    log_model_node("positions.input", positions);
+    log_model_node("input_embedding.input", inputs_embeds);
+    dump_model_node("tokens.input", tokens);
+    dump_model_node("positions.input", positions);
+    dump_model_node("input_embedding.input", inputs_embeds);
     torch::Tensor h =
         inputs_embeds.defined() ? inputs_embeds : embed_tokens_(tokens);
+    log_model_node("embed_tokens.output", h);
+    dump_model_node("embed_tokens.output", h);
 
     if (h.dim() == 2) {
       h = h.unsqueeze(1).repeat({1, hc_mult_, 1});
     }
+    log_model_node("hidden_states.after_expand", h);
+    dump_model_node("hidden_states.after_expand", h);
 
     // Keep runtime inputs on the same accelerator device.
     const auto runtime_device = h.device();
@@ -423,6 +546,14 @@ class DeepseekV4ModelImpl
           }
         }
       }
+      log_model_node("dsa.cos", dsa.cos);
+      log_model_node("dsa.sin", dsa.sin);
+      log_model_node("dsa.c4_cos", dsa.c4_cos);
+      log_model_node("dsa.c4_sin", dsa.c4_sin);
+      dump_model_node("dsa.cos", dsa.cos);
+      dump_model_node("dsa.sin", dsa.sin);
+      dump_model_node("dsa.c4_cos", dsa.c4_cos);
+      dump_model_node("dsa.c4_sin", dsa.c4_sin);
 
       if (dsa.actual_seq_lengths_kv.defined() && dsa.seq_lens_q.defined()) {
         dsa.start_pos =
@@ -467,6 +598,19 @@ class DeepseekV4ModelImpl
                 dsa.slot_mappings[layer_id][attn_cache_idx];
           }
         }
+        if (layer_id == 0) {
+          log_model_node("layer0.block_table.input", attn_metadata.block_table);
+          log_model_node("layer0.slot_mapping.input",
+                         attn_metadata.slot_mapping);
+          dump_model_node("layer0.block_table.input",
+                          attn_metadata.block_table);
+          dump_model_node("layer0.slot_mapping.input",
+                          attn_metadata.slot_mapping);
+        }
+      }
+      if (i == 0) {
+        log_model_node("layer0.hidden_states.input", h);
+        dump_model_node("layer0.hidden_states.input", h);
       }
 
       h = layers_[i](h,
@@ -476,9 +620,23 @@ class DeepseekV4ModelImpl
                      kv_caches[i],
                      modified_input_params,
                      tokens);
+      if (i == 0) {
+        log_model_node("layer0.hidden_states.output", h);
+        dump_model_node("layer0.hidden_states.output", h);
+      }
     }
     h = hc_head(h);
+    log_model_node("hc_head.output", h);
+    dump_model_node("hc_head.output", h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
+    log_model_node("norm.hidden_states.output", hidden_states);
+    log_model_node(
+        "norm.residual.output",
+        residual_out.has_value() ? residual_out.value() : torch::Tensor());
+    dump_model_node("norm.hidden_states.output", hidden_states);
+    if (residual_out.has_value()) {
+      dump_model_node("norm.residual.output", residual_out.value());
+    }
     return ModelOutput(hidden_states, residual_out);
   }
 
@@ -751,6 +909,7 @@ class DeepseekV4ModelImpl
   double norm_eps_ = 1e-6;
 
   int64_t num_heads_ = 0;
+  int64_t tp_rank_ = 0;
   int64_t tp_num_heads_ = 0;
   int64_t dp_local_tp_size_ = 1;
   int64_t head_dim_ = 0;

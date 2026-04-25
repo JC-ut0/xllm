@@ -175,15 +175,11 @@ std::string rope_dump_root() {
   return "./xllm_deepseek_v4_rope_dump";
 }
 
-torch::Tensor first_token_tensor(const torch::Tensor& tensor) {
+torch::Tensor dump_tensor_on_cpu(const torch::Tensor& tensor) {
   if (!tensor.defined() || tensor.numel() == 0) {
     return torch::Tensor();
   }
-  auto out = tensor.detach();
-  if (out.dim() > 0) {
-    out = out.select(0, 0);
-  }
-  return out.contiguous().to(torch::kCPU);
+  return tensor.contiguous().to(torch::kCPU);
 }
 
 void dump_rope_tensor(const std::string& layer_dir,
@@ -195,7 +191,7 @@ void dump_rope_tensor(const std::string& layer_dir,
   const auto path = layer_dir + "/" + sanitize_dump_name(name) + ".pt";
   torch::Tensor out;
   try {
-    out = first_token_tensor(tensor);
+    out = dump_tensor_on_cpu(tensor);
   } catch (const c10::Error& e) {
     LOG(WARNING) << "[DSV4][RoPE Dump] failed to prepare " << path << ": "
                  << e.what_without_backtrace();
