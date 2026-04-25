@@ -136,6 +136,13 @@ class DeepseekV4ModelImpl
     num_heads_ = model_args.n_heads();
     head_dim_ = model_args.head_dim();
     head_dim_ = model_args.o_lora_rank() + model_args.qk_rope_head_dim();
+    LOG(INFO) << "[DSV4][HeadDim][ModelInit] model_args.head_dim="
+              << model_args.head_dim()
+              << " model_metadata_head_dim=" << head_dim_
+              << " o_lora_rank=" << model_args.o_lora_rank()
+              << " qk_rope_head_dim=" << model_args.qk_rope_head_dim()
+              << " rope_head_dim=" << model_args.rope_head_dim()
+              << " n_heads=" << num_heads_;
     dp_local_tp_size_ =
         std::max<int64_t>(parallel_args.world_size() /
                               std::max<int64_t>(parallel_args.dp_size(), 1),
@@ -536,6 +543,13 @@ class DeepseekV4ModelImpl
         pick_max_seqlen(dsa.max_seqlen_kv, dsa.actual_seq_lengths_kv);
     const int64_t ori_win_left = std::max<int64_t>(window_size_ - 1, 0);
     const int64_t sparse_topk = std::max<int64_t>(index_topk_, 1);
+
+    LOG(INFO) << "[DSV4][HeadDim][Metadata] metadata_head_dim=" << head_dim_
+              << " tp_num_heads=" << tp_num_heads_
+              << " index_head_dim=" << index_head_dim_
+              << " index_topk=" << index_topk_ << " batch_size=" << batch_size
+              << " max_seqlen_q=" << max_seqlen_q
+              << " max_seqlen_kv=" << max_seqlen_kv;
 
     xllm::kernel::SparseAttnSharedkvMetadataParams c1_params;
     c1_params.num_heads_q = tp_num_heads_;

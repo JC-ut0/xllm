@@ -17,9 +17,15 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <memory>
+#include <sstream>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -120,12 +126,169 @@ DsaCacheMapping resolve_cache_mapping(const DSAMetadata& attn_metadata,
   return mapping;
 }
 
+std::string tensor_shape_string(const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return "undefined";
+  }
+  std::ostringstream os;
+  os << "[";
+  for (int64_t i = 0; i < tensor.dim(); ++i) {
+    if (i > 0) {
+      os << ",";
+    }
+    os << tensor.size(i);
+  }
+  os << "]";
+  return os.str();
+}
+
+std::string tensor_dtype_device_string(const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return "undefined";
+  }
+  std::ostringstream os;
+  os << tensor.scalar_type() << "," << tensor.device();
+  return os.str();
+}
+
+std::string sanitize_dump_name(std::string name) {
+  for (auto& ch : name) {
+    if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' ||
+          ch == '-' || ch == '.')) {
+      ch = '_';
+    }
+  }
+  return name;
+}
+
+std::string rope_dump_root() {
+  const char* disabled = std::getenv("XLLM_DSV4_ROPE_DUMP_DISABLE");
+  if (disabled != nullptr && std::string(disabled) == "1") {
+    return "";
+  }
+  const char* root = std::getenv("XLLM_DSV4_ROPE_DUMP_DIR");
+  if (root != nullptr && root[0] != '\0') {
+    return root;
+  }
+  return "./xllm_deepseek_v4_rope_dump";
+}
+
+torch::Tensor first_token_tensor(const torch::Tensor& tensor) {
+  if (!tensor.defined() || tensor.numel() == 0) {
+    return torch::Tensor();
+  }
+  auto out = tensor.detach();
+  if (out.dim() > 0) {
+    out = out.select(0, 0);
+  }
+  return out.contiguous().to(torch::kCPU);
+}
+
+void dump_rope_tensor(const std::string& layer_dir,
+                      const std::string& name,
+                      const torch::Tensor& tensor) {
+  if (layer_dir.empty() || !tensor.defined()) {
+    return;
+  }
+  const auto path = layer_dir + "/" + sanitize_dump_name(name) + ".pt";
+  try {
+    torch::save(first_token_tensor(tensor), path);
+  } catch (const c10::Error& e) {
+    LOG(WARNING) << "[DSV4][RoPE Dump] failed to save " << path << ": "
+                 << e.what_without_backtrace();
+  }
+}
+
+void dump_rope_text(const std::string& layer_dir,
+                    const std::string& name,
+                    const std::string& text) {
+  if (layer_dir.empty()) {
+    return;
+  }
+  const auto path = layer_dir + "/" + sanitize_dump_name(name) + ".txt";
+  std::ofstream ofs(path, std::ios::out | std::ios::trunc);
+  if (!ofs) {
+    LOG(WARNING) << "[DSV4][RoPE Dump] failed to open " << path;
+    return;
+  }
+  ofs << text;
+}
+
+std::string make_rope_layer_dump_dir(int32_t layer_id) {
+  auto root = rope_dump_root();
+  if (root.empty()) {
+    return "";
+  }
+  const auto layer_name = "layer_" + std::to_string(layer_id);
+  const auto layer_dir = root + "/" + layer_name;
+  try {
+    std::filesystem::create_directories(layer_dir);
+  } catch (const std::filesystem::filesystem_error& e) {
+    LOG(WARNING) << "[DSV4][RoPE Dump] failed to create " << layer_dir << ": "
+                 << e.what();
+    return "";
+  }
+  return layer_dir;
+}
+
+void dump_rope_call(const std::string& layer_dir,
+                    const std::string& stage,
+                    int32_t layer_id,
+                    int64_t rope_start_dim,
+                    int64_t rope_head_dim,
+                    bool inverse,
+                    const torch::Tensor& input_before,
+                    const torch::Tensor& cos,
+                    const torch::Tensor& sin,
+                    const torch::Tensor& input_after) {
+  LOG(INFO) << "[DSV4][RoPE] layer=" << layer_id << " stage=" << stage
+            << " inverse=" << inverse << " rope_start_dim=" << rope_start_dim
+            << " rope_head_dim=" << rope_head_dim
+            << " input=" << tensor_shape_string(input_before) << "/"
+            << tensor_dtype_device_string(input_before)
+            << " cos=" << tensor_shape_string(cos) << "/"
+            << tensor_dtype_device_string(cos)
+            << " sin=" << tensor_shape_string(sin) << "/"
+            << tensor_dtype_device_string(sin)
+            << " output=" << tensor_shape_string(input_after) << "/"
+            << tensor_dtype_device_string(input_after);
+
+  if (layer_dir.empty()) {
+    return;
+  }
+  const auto safe_stage = sanitize_dump_name(stage);
+  std::ostringstream meta;
+  meta << "layer=" << layer_id << "\n"
+       << "stage=" << stage << "\n"
+       << "inverse=" << inverse << "\n"
+       << "rope_start_dim=" << rope_start_dim << "\n"
+       << "rope_head_dim=" << rope_head_dim << "\n"
+       << "input_shape=" << tensor_shape_string(input_before) << "\n"
+       << "input_dtype_device=" << tensor_dtype_device_string(input_before)
+       << "\n"
+       << "cos_shape=" << tensor_shape_string(cos) << "\n"
+       << "cos_dtype_device=" << tensor_dtype_device_string(cos) << "\n"
+       << "sin_shape=" << tensor_shape_string(sin) << "\n"
+       << "sin_dtype_device=" << tensor_dtype_device_string(sin) << "\n"
+       << "output_shape=" << tensor_shape_string(input_after) << "\n"
+       << "output_dtype_device=" << tensor_dtype_device_string(input_after)
+       << "\n";
+  dump_rope_text(layer_dir, safe_stage + ".meta", meta.str());
+  dump_rope_tensor(layer_dir, safe_stage + ".input_before", input_before);
+  dump_rope_tensor(layer_dir, safe_stage + ".cos", cos);
+  dump_rope_tensor(layer_dir, safe_stage + ".sin", sin);
+  dump_rope_tensor(layer_dir, safe_stage + ".input_after", input_after);
+}
+
 void apply_partial_rope(torch::Tensor& input,
                         int64_t rope_start_dim,
                         int64_t rope_head_dim,
                         const torch::Tensor& cos,
                         const torch::Tensor& sin,
-                        bool inverse = false) {
+                        bool inverse = false,
+                        int32_t layer_id = -1,
+                        const std::string& stage = "rope",
+                        const std::string& layer_dump_dir = "") {
   if (!input.defined() || !cos.defined() || !sin.defined() ||
       rope_head_dim <= 0 || rope_start_dim < 0) {
     return;
@@ -154,6 +317,7 @@ void apply_partial_rope(torch::Tensor& input,
       << rope_head_dim << "), got cos " << cos_cache.size(1) << ", sin "
       << sin_cache.size(1);
 
+  auto input_before = input.detach().clone();
   auto cos_4d = cos_cache.view({cos_cache.size(0), 1, 1, rope_head_dim});
   auto sin_4d = sin_cache.view({sin_cache.size(0), 1, 1, rope_head_dim});
   auto input_4d =
@@ -167,6 +331,16 @@ void apply_partial_rope(torch::Tensor& input,
   xllm::kernel::npu_inplace_partial_rotary_mul(rope_params);
   input =
       (input.dim() == 3) ? input_4d.squeeze(2) : input_4d.squeeze(1).squeeze(1);
+  dump_rope_call(layer_dump_dir,
+                 stage,
+                 layer_id,
+                 rope_start_dim,
+                 rope_head_dim,
+                 inverse,
+                 input_before,
+                 cos,
+                 sin_cache,
+                 input);
 }
 
 void scatter_by_slot(torch::Tensor& cache,
@@ -327,6 +501,16 @@ DSAttentionImpl::DSAttentionImpl(const ModelArgs& args,
   nope_head_dim_ = head_dim_ - rope_head_dim_;
   qk_head_dim_ = nope_head_dim_ + rope_head_dim_;
 
+  LOG(INFO) << "[DSV4][HeadDim][AttentionInit] layer=" << layer_id
+            << " attention_head_dim(args.head_dim)=" << head_dim_
+            << " head_size=" << head_size_
+            << " rope_head_dim=" << rope_head_dim_
+            << " nope_head_dim=" << nope_head_dim_
+            << " qk_head_dim=" << qk_head_dim_
+            << " q_lora_rank=" << q_lora_rank_
+            << " o_lora_rank=" << o_lora_rank_
+            << " compress_ratio=" << compress_ratio_;
+
   const int64_t tp_size = parallel_args.tp_group_->world_size();
   tp_rank_ = parallel_args.tp_group_->rank();
   tp_size_ = tp_size;
@@ -452,6 +636,17 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
 
   auto [c1_metadata, c4_metadata, c128_metadata, qli_metadata] =
       compress_metadata;
+  const int32_t layer_id = attn_metadata.layer_id;
+  const auto rope_layer_dump_dir = make_rope_layer_dump_dir(layer_id);
+
+  LOG(INFO) << "[DSV4][HeadDim][AttentionForward] layer=" << layer_id
+            << " attention_head_dim=" << head_dim_
+            << " rope_head_dim=" << rope_head_dim_
+            << " nope_head_dim=" << nope_head_dim_
+            << " qk_head_dim=" << qk_head_dim_
+            << " hidden_states=" << tensor_shape_string(hidden_states)
+            << " cos=" << tensor_shape_string(attn_metadata.cos)
+            << " sin=" << tensor_shape_string(attn_metadata.sin);
 
   // 1) q projection + q rmsnorm
   auto q_down = q_a_proj_->forward(hidden_states);
@@ -474,8 +669,24 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   // 3) RoPE (q and kv)
   auto cos = attn_metadata.cos;
   auto sin = attn_metadata.sin;
-  apply_partial_rope(q, nope_head_dim_, rope_head_dim_, cos, sin);
-  apply_partial_rope(kv, nope_head_dim_, rope_head_dim_, cos, sin);
+  apply_partial_rope(q,
+                     nope_head_dim_,
+                     rope_head_dim_,
+                     cos,
+                     sin,
+                     /*inverse=*/false,
+                     layer_id,
+                     "q_forward_rope",
+                     rope_layer_dump_dir);
+  apply_partial_rope(kv,
+                     nope_head_dim_,
+                     rope_head_dim_,
+                     cos,
+                     sin,
+                     /*inverse=*/false,
+                     layer_id,
+                     "kv_forward_rope",
+                     rope_layer_dump_dir);
 
   // 4) resolve per-layer cache mapping
   const int64_t compress_ratio_i = static_cast<int64_t>(compress_ratio_);
@@ -560,6 +771,25 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
       compress_sin = attn_metadata.c128_sin;
     }
 
+    LOG(INFO) << "[DSV4][RoPE][CompressorInputs] layer=" << layer_id
+              << " compress_ratio=" << compress_ratio_i
+              << " hidden_states=" << tensor_shape_string(hidden_states)
+              << " compress_sin=" << tensor_shape_string(compress_sin) << "/"
+              << tensor_dtype_device_string(compress_sin)
+              << " compress_cos=" << tensor_shape_string(compress_cos) << "/"
+              << tensor_dtype_device_string(compress_cos)
+              << " actual_seq_lengths_query="
+              << tensor_shape_string(attn_metadata.actual_seq_lengths_query);
+    dump_rope_tensor(
+        rope_layer_dump_dir, "compressor.hidden_states.input", hidden_states);
+    dump_rope_tensor(
+        rope_layer_dump_dir, "compressor.compress_sin.input", compress_sin);
+    dump_rope_tensor(
+        rope_layer_dump_dir, "compressor.compress_cos.input", compress_cos);
+    dump_rope_tensor(rope_layer_dump_dir,
+                     "compressor.actual_seq_lengths_query.input",
+                     attn_metadata.actual_seq_lengths_query);
+
     std::tuple<torch::Tensor, torch::Tensor> compressor_states{
         compressor_kv_state, compressor_score_state};
     std::tuple<torch::Tensor, torch::Tensor> compressor_block_tables{
@@ -573,6 +803,11 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                              compress_sin,
                              compress_cos,
                              attn_metadata.actual_seq_lengths_query);
+    LOG(INFO) << "[DSV4][RoPE][CompressorOutput] layer=" << layer_id
+              << " compressed_kv=" << tensor_shape_string(compressed_kv) << "/"
+              << tensor_dtype_device_string(compressed_kv);
+    dump_rope_tensor(
+        rope_layer_dump_dir, "compressor.compressed_kv.output", compressed_kv);
     scatter_by_slot(cmp_kv, cmp_slot, compressed_kv);
   }
 
@@ -590,6 +825,22 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
     CHECK(qli_metadata.defined()) << "DSAttention requires precomputed "
                                      "qli_metadata for compress_ratio==4.";
     auto qli_metadata_opt = std::optional<torch::Tensor>(qli_metadata);
+    LOG(INFO) << "[DSV4][RoPE][IndexerInputs] layer=" << layer_id
+              << " cos=" << tensor_shape_string(cos) << "/"
+              << tensor_dtype_device_string(cos)
+              << " sin=" << tensor_shape_string(sin) << "/"
+              << tensor_dtype_device_string(sin)
+              << " c4_cos=" << tensor_shape_string(attn_metadata.c4_cos) << "/"
+              << tensor_dtype_device_string(attn_metadata.c4_cos)
+              << " c4_sin=" << tensor_shape_string(attn_metadata.c4_sin) << "/"
+              << tensor_dtype_device_string(attn_metadata.c4_sin);
+    dump_rope_tensor(rope_layer_dump_dir, "indexer.qr.input", qr);
+    dump_rope_tensor(rope_layer_dump_dir, "indexer.cos.input", cos);
+    dump_rope_tensor(rope_layer_dump_dir, "indexer.sin.input", sin);
+    dump_rope_tensor(
+        rope_layer_dump_dir, "indexer.c4_cos.input", attn_metadata.c4_cos);
+    dump_rope_tensor(
+        rope_layer_dump_dir, "indexer.c4_sin.input", attn_metadata.c4_sin);
     compress_topk_idxs =
         indexer_->select_qli(hidden_states,
                              qr,
@@ -606,6 +857,13 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                              isprefill,
                              &indexer_states,
                              &indexer_block_tables);
+    LOG(INFO) << "[DSV4][RoPE][IndexerOutput] layer=" << layer_id
+              << " compress_topk_idxs="
+              << tensor_shape_string(compress_topk_idxs) << "/"
+              << tensor_dtype_device_string(compress_topk_idxs);
+    dump_rope_tensor(rope_layer_dump_dir,
+                     "indexer.compress_topk_idxs.output",
+                     compress_topk_idxs);
     CHECK(compress_topk_idxs.defined())
         << "DSAttention indexer returned undefined topk indices for "
            "compress_ratio==4.";
@@ -656,8 +914,15 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
 
   // 8) output RoPE + projection
   auto o = attn_output.view({-1, n_local_heads_, head_dim_});
-  apply_partial_rope(
-      o, nope_head_dim_, rope_head_dim_, cos, sin, /*inverse=*/true);
+  apply_partial_rope(o,
+                     nope_head_dim_,
+                     rope_head_dim_,
+                     cos,
+                     sin,
+                     /*inverse=*/true,
+                     layer_id,
+                     "o_inverse_rope",
+                     rope_layer_dump_dir);
 
   const int64_t num_tokens = o.size(0);
   auto o_group = o.view({num_tokens, n_local_groups_, -1});
