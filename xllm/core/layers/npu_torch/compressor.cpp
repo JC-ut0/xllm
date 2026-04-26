@@ -31,6 +31,7 @@ limitations under the License.
 #endif
 
 #include "kernels/ops_api.h"
+#include "util/tensor_dump.h"
 
 DECLARE_bool(enable_chunked_prefill);
 namespace xllm {
@@ -124,6 +125,31 @@ torch::Tensor CompressorImpl::forward(
 
   auto [kv_state, score_state] = kv_states;
   auto [kv_block_table, score_block_table] = block_tables;
+  tensor_dump::save_tensor(
+      "attention/compressor/kernel", "input_hidden_states", hidden_states);
+  tensor_dump::save_tensor(
+      "attention/compressor/kernel", "input_wkv", cmp_wkv_);
+  tensor_dump::save_tensor(
+      "attention/compressor/kernel", "input_wgate", cmp_wgate_);
+  tensor_dump::save_tensor(
+      "attention/compressor/kernel", "input_kv_state", kv_state);
+  tensor_dump::save_tensor(
+      "attention/compressor/kernel", "input_score_state", score_state);
+  tensor_dump::save_tensor(
+      "attention/compressor/kernel", "input_ape", cmp_ape_);
+  tensor_dump::save_tensor(
+      "attention/compressor/kernel", "input_norm_weight", cmp_norm_);
+  tensor_dump::save_tensor(
+      "attention/compressor/kernel", "input_kv_block_table", kv_block_table);
+  tensor_dump::save_tensor("attention/compressor/kernel",
+                           "input_score_block_table",
+                           score_block_table);
+  tensor_dump::save_tensor("attention/compressor/kernel",
+                           "input_actual_seq_lengths_query",
+                           actual_seq_lengths_query);
+  tensor_dump::save_tensor("attention/compressor/kernel",
+                           "input_start_pos",
+                           attn_metadata.start_pos);
 
   const int64_t sin_last_dim = compressed_sin.size(compressed_sin.dim() - 1);
   const int64_t cos_last_dim = compressed_cos.size(compressed_cos.dim() - 1);
@@ -140,6 +166,10 @@ torch::Tensor CompressorImpl::forward(
   params.norm_weight = cmp_norm_;
   params.rope_sin = compressed_sin.view({-1, sin_last_dim});
   params.rope_cos = compressed_cos.view({-1, cos_last_dim});
+  tensor_dump::save_tensor(
+      "attention/compressor/kernel", "input_rope_sin", params.rope_sin);
+  tensor_dump::save_tensor(
+      "attention/compressor/kernel", "input_rope_cos", params.rope_cos);
   params.kv_block_table = c10::optional<torch::Tensor>(kv_block_table);
   params.score_block_table = c10::optional<torch::Tensor>(score_block_table);
   params.cu_seqlens = c10::optional<torch::Tensor>(actual_seq_lengths_query);
@@ -154,6 +184,8 @@ torch::Tensor CompressorImpl::forward(
 
   std::tie(compressed_kv, std::ignore, std::ignore, std::ignore, std::ignore) =
       xllm::kernel::compressor(params);
+  tensor_dump::save_tensor(
+      "attention/compressor/kernel", "output_compressed_kv", compressed_kv);
   return compressed_kv;
 }
 
