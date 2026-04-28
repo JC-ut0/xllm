@@ -154,9 +154,20 @@ inline std::string target_layers_raw() {
   return std::string(value);
 }
 
-inline std::vector<int64_t> target_layers() {
-  const std::string raw = target_layers_raw();
-  std::vector<int64_t> layers;
+inline std::string target_steps_raw() {
+  const char* value = std::getenv("XLLM_DUMP_STEP");
+  if (value == nullptr || value[0] == '\0') {
+    return "0";
+  }
+  return std::string(value);
+}
+
+inline std::vector<int64_t> parse_non_negative_int64_list(
+    const std::string& raw,
+    const char* env_name,
+    int64_t fallback_value,
+    bool* warned) {
+  std::vector<int64_t> values;
   std::stringstream ss(raw);
   std::string token;
 
@@ -171,31 +182,49 @@ inline std::vector<int64_t> target_layers() {
 
     try {
       size_t parsed_chars = 0;
-      const int64_t layer = std::stoll(token, &parsed_chars);
-      if (parsed_chars != token.size() || layer < 0) {
-        throw std::invalid_argument("invalid layer");
+      const int64_t value = std::stoll(token, &parsed_chars);
+      if (parsed_chars != token.size() || value < 0) {
+        throw std::invalid_argument("invalid value");
       }
-      layers.push_back(layer);
+      values.push_back(value);
     } catch (const std::exception&) {
-      static bool warned = false;
-      if (!warned) {
-        LOG(WARNING) << "Invalid XLLM_DUMP_LAYER=" << raw
-                     << "; fallback to layer0.";
-        warned = true;
+      if (warned == nullptr || !*warned) {
+        LOG(WARNING) << "Invalid " << env_name << "=" << raw << "; fallback to "
+                     << fallback_value << ".";
+        if (warned != nullptr) {
+          *warned = true;
+        }
       }
-      return {0};
+      return {fallback_value};
     }
   }
 
-  if (layers.empty()) {
-    return {0};
+  if (values.empty()) {
+    return {fallback_value};
   }
-  return layers;
+  return values;
+}
+
+inline std::vector<int64_t> target_layers() {
+  static bool warned = false;
+  return parse_non_negative_int64_list(
+      target_layers_raw(), "XLLM_DUMP_LAYER", 0, &warned);
+}
+
+inline std::vector<int64_t> target_steps() {
+  static bool warned = false;
+  return parse_non_negative_int64_list(
+      target_steps_raw(), "XLLM_DUMP_STEP", 0, &warned);
 }
 
 inline bool is_target_layer(int64_t layer) {
   const auto layers = target_layers();
   return std::find(layers.begin(), layers.end(), layer) != layers.end();
+}
+
+inline bool is_target_step(int64_t step) {
+  const auto steps = target_steps();
+  return std::find(steps.begin(), steps.end(), step) != steps.end();
 }
 
 inline std::optional<std::filesystem::path> dump_root() {
@@ -213,8 +242,8 @@ inline std::optional<std::filesystem::path> dump_root() {
 }
 
 inline bool should_dump(int64_t layer) {
-  return enabled() && g_context.step == 0 && is_target_layer(layer) &&
-         dump_root().has_value();
+  return enabled() && is_target_step(g_context.step) &&
+         is_target_layer(layer) && dump_root().has_value();
 }
 
 inline bool should_dump_current() {
@@ -279,11 +308,11 @@ inline std::optional<std::filesystem::path> dump_root_or_log_skip(
               << tensor_info(tensor);
     return std::nullopt;
   }
-  if (g_context.step != 0) {
+  if (!is_target_step(g_context.step)) {
     LOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
-              << ": current version only dumps step0, rank=" << rank
-              << ", step=" << g_context.step << ", layer=" << layer << ", "
-              << tensor_info(tensor);
+              << ": current target steps are [" << target_steps_raw()
+              << "], rank=" << rank << ", step=" << g_context.step
+              << ", layer=" << layer << ", " << tensor_info(tensor);
     return std::nullopt;
   }
   if (!is_target_layer(layer)) {
