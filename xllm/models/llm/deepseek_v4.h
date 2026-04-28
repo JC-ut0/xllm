@@ -137,6 +137,7 @@ class DeepseekV4ModelImpl
     hc_mult_ = model_args.hc_mult();
     hc_eps_ = static_cast<double>(model_args.hc_eps());
     norm_eps_ = static_cast<double>(model_args.rms_norm_eps());
+    rank_ = parallel_args.rank();
 
     num_heads_ = model_args.n_heads();
     head_dim_ = model_args.head_dim();
@@ -309,18 +310,26 @@ class DeepseekV4ModelImpl
     torch::NoGradGuard no_grad;
     const int64_t dump_step = forward_step_.fetch_add(1);
     tensor_dump::ScopedStep dump_step_scope(dump_step);
+    tensor_dump::ScopedRankLayer dump_model_scope(rank_, 0);
     if (tokens.numel() == 0) {
       tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
       positions = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
     }
 
+    tensor_dump::save_tensor("model", "input_tokens", tokens);
+    tensor_dump::save_tensor("model", "input_positions", positions);
+    tensor_dump::save_optional_tensor(
+        "model", "input_embedding", input_params.input_embedding);
+
     auto inputs_embeds = input_params.input_embedding;
     torch::Tensor h =
         inputs_embeds.defined() ? inputs_embeds : embed_tokens_(tokens);
+    tensor_dump::save_tensor("model", "input_embeds", h);
 
     if (h.dim() == 2) {
       h = h.unsqueeze(1).repeat({1, hc_mult_, 1});
     }
+    tensor_dump::save_tensor("model", "input_hidden_states", h);
 
     // Keep runtime inputs on the same accelerator device.
     const auto runtime_device = h.device();
@@ -534,7 +543,10 @@ class DeepseekV4ModelImpl
                      tokens);
     }
     h = hc_head(h);
+    tensor_dump::save_tensor("model", "output_hc_head", h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
+    tensor_dump::save_tensor("model", "output_hidden_states", hidden_states);
+    tensor_dump::save_optional_tensor("model", "output_residual", residual_out);
     return ModelOutput(hidden_states, residual_out);
   }
 
@@ -800,6 +812,7 @@ class DeepseekV4ModelImpl
   int64_t hc_mult_ = 1;
   double hc_eps_ = 0.0;
   double norm_eps_ = 1e-6;
+  int32_t rank_ = -1;
 
   int64_t num_heads_ = 0;
   int64_t tp_num_heads_ = 0;

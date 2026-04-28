@@ -302,32 +302,32 @@ inline std::optional<std::filesystem::path> dump_root_or_log_skip(
     const std::string& name,
     const torch::Tensor& tensor) {
   if (!enabled()) {
-    LOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
-              << ": XLLM_DUMP_TENSOR is disabled, rank=" << rank
-              << ", step=" << g_context.step << ", layer=" << layer << ", "
-              << tensor_info(tensor);
+    DLOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
+               << ": XLLM_DUMP_TENSOR is disabled, rank=" << rank
+               << ", step=" << g_context.step << ", layer=" << layer << ", "
+               << tensor_info(tensor);
     return std::nullopt;
   }
   if (!is_target_step(g_context.step)) {
-    LOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
-              << ": current target steps are [" << target_steps_raw()
-              << "], rank=" << rank << ", step=" << g_context.step
-              << ", layer=" << layer << ", " << tensor_info(tensor);
+    DLOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
+               << ": current target steps are [" << target_steps_raw()
+               << "], rank=" << rank << ", step=" << g_context.step
+               << ", layer=" << layer << ", " << tensor_info(tensor);
     return std::nullopt;
   }
   if (!is_target_layer(layer)) {
-    LOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
-              << ": current target layers are [" << target_layers_raw()
-              << "], rank=" << rank << ", step=" << g_context.step
-              << ", layer=" << layer << ", " << tensor_info(tensor);
+    DLOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
+               << ": current target layers are [" << target_layers_raw()
+               << "], rank=" << rank << ", step=" << g_context.step
+               << ", layer=" << layer << ", " << tensor_info(tensor);
     return std::nullopt;
   }
   auto root = dump_root();
   if (!root.has_value()) {
-    LOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
-              << ": DUMP_DIR is not set, rank=" << rank
-              << ", step=" << g_context.step << ", layer=" << layer << ", "
-              << tensor_info(tensor);
+    DLOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
+               << ": DUMP_DIR is not set, rank=" << rank
+               << ", step=" << g_context.step << ", layer=" << layer << ", "
+               << tensor_info(tensor);
     return std::nullopt;
   }
   return root;
@@ -340,9 +340,9 @@ inline void save_tensor(int32_t rank,
                         const torch::Tensor& tensor) {
   const std::string prefixed_module = module_with_sequence(module);
   if (!tensor.defined()) {
-    LOG(INFO) << "[TENSOR_DUMP] skip " << prefixed_module << "/" << name
-              << ": tensor is undefined, rank=" << rank
-              << ", step=" << g_context.step << ", layer=" << layer;
+    DLOG(INFO) << "[TENSOR_DUMP] skip " << prefixed_module << "/" << name
+               << ": tensor is undefined, rank=" << rank
+               << ", step=" << g_context.step << ", layer=" << layer;
     return;
   }
 
@@ -378,9 +378,9 @@ inline void save_optional_tensor(int32_t rank,
   if (tensor.has_value()) {
     save_tensor(rank, layer, module, name, tensor.value());
   } else {
-    LOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
-              << ": optional tensor has no value, rank=" << rank
-              << ", step=" << g_context.step << ", layer=" << layer;
+    DLOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
+               << ": optional tensor has no value, rank=" << rank
+               << ", step=" << g_context.step << ", layer=" << layer;
   }
 }
 
@@ -388,10 +388,10 @@ inline void save_tensor(const std::string& module,
                         const std::string& name,
                         const torch::Tensor& tensor) {
   if (g_context.rank < 0 || g_context.layer < 0) {
-    LOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
-              << ": dump rank/layer context is not set, rank=" << g_context.rank
-              << ", step=" << g_context.step << ", layer=" << g_context.layer
-              << ", " << tensor_info(tensor);
+    DLOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
+               << ": dump rank/layer context is not set, rank="
+               << g_context.rank << ", step=" << g_context.step
+               << ", layer=" << g_context.layer << ", " << tensor_info(tensor);
     return;
   }
   save_tensor(g_context.rank, g_context.layer, module, name, tensor);
@@ -401,15 +401,16 @@ inline void save_optional_tensor(const std::string& module,
                                  const std::string& name,
                                  const std::optional<torch::Tensor>& tensor) {
   if (g_context.rank < 0 || g_context.layer < 0) {
-    LOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
-              << ": dump rank/layer context is not set, rank=" << g_context.rank
-              << ", step=" << g_context.step << ", layer=" << g_context.layer;
+    DLOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
+               << ": dump rank/layer context is not set, rank="
+               << g_context.rank << ", step=" << g_context.step
+               << ", layer=" << g_context.layer;
     return;
   }
   if (!tensor.has_value()) {
-    LOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
-              << ": optional tensor has no value, rank=" << g_context.rank
-              << ", step=" << g_context.step << ", layer=" << g_context.layer;
+    DLOG(INFO) << "[TENSOR_DUMP] skip " << module << "/" << name
+               << ": optional tensor has no value, rank=" << g_context.rank
+               << ", step=" << g_context.step << ", layer=" << g_context.layer;
     return;
   }
   save_tensor(module, name, tensor.value());
