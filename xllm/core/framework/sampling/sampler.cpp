@@ -19,15 +19,60 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
+#include <sstream>
+
 #include "common/global_flags.h"
 #include "logits_utils.h"
 #include "sampling_params.h"
 
 namespace xllm {
+namespace {
+
+std::string tensor_debug_string(const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return "undefined";
+  }
+  std::ostringstream os;
+  os << "sizes=" << tensor.sizes() << ", dtype=" << tensor.dtype()
+     << ", device=" << tensor.device() << ", numel=" << tensor.numel();
+  return os.str();
+}
+
+std::string tensor_head_values(const torch::Tensor& tensor,
+                               int64_t max_values = 8) {
+  if (!tensor.defined() || tensor.numel() == 0) {
+    return "[]";
+  }
+  auto flat = tensor.reshape({-1});
+  const int64_t n = std::min<int64_t>(flat.numel(), max_values);
+  auto head = flat.slice(/*dim=*/0, /*start=*/0, /*end=*/n)
+                  .to(torch::kCPU, /*non_blocking=*/false);
+  std::ostringstream os;
+  os << head;
+  return os.str();
+}
+
+}  // namespace
 
 SampleOutput Sampler::forward(torch::Tensor& logits,
                               const SamplingParameters& params) const {
   SampleOutput output;
+  LOG(INFO) << "[PREFILL_OUTPUT_DEBUG][Sampler] input logits="
+            << tensor_debug_string(logits)
+            << ", logits_head=" << tensor_head_values(logits)
+            << ", selected_token_idxes="
+            << tensor_debug_string(params.selected_token_idxes)
+            << ", selected_token_idxes_head="
+            << tensor_head_values(params.selected_token_idxes)
+            << ", sample_idxes=" << tensor_debug_string(params.sample_idxes)
+            << ", sample_idxes_head=" << tensor_head_values(params.sample_idxes)
+            << ", do_sample=" << tensor_debug_string(params.do_sample)
+            << ", do_sample_head=" << tensor_head_values(params.do_sample)
+            << ", all_greedy=" << params.all_greedy_sample
+            << ", all_random=" << params.all_random_sample
+            << ", logprobs=" << params.logprobs
+            << ", max_top_logprobs=" << params.max_top_logprobs;
   // apply frequency and presence penalties
   if (params.frequency_penalties.defined()) {
     apply_frequency_presence_penalties(logits,
@@ -50,6 +95,10 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
   if (params.selected_token_idxes.numel() != params.sample_idxes.numel()) {
     sample_logits = logits.index_select(/*dim=*/0, params.sample_idxes);
   }
+
+  LOG(INFO) << "[PREFILL_OUTPUT_DEBUG][Sampler] sample_logits="
+            << tensor_debug_string(sample_logits)
+            << ", sample_logits_head=" << tensor_head_values(sample_logits);
 
   CHECK(params.do_sample.defined()) << "params.do_sample must be defined";
   CHECK_EQ(params.do_sample.dim(), 1)
@@ -78,6 +127,10 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
   }
   output.probs = probs.to(logits.dtype());
   output.next_tokens = samples;
+  LOG(INFO) << "[PREFILL_OUTPUT_DEBUG][Sampler] output next_tokens="
+            << tensor_debug_string(output.next_tokens)
+            << ", next_tokens_head=" << tensor_head_values(output.next_tokens)
+            << ", probs=" << tensor_debug_string(output.probs);
 
   if (params.logprobs) {
     if (FLAGS_enable_qwen3_reranker) {

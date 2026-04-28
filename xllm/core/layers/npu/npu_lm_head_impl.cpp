@@ -17,11 +17,41 @@ limitations under the License.
 
 #include <gflags/gflags.h>
 #include <glog/logging.h>
+
+#include <algorithm>
+#include <sstream>
 DECLARE_string(rank_tablefile);
 DECLARE_string(communication_backend);
 
 namespace xllm {
 namespace layer {
+namespace {
+
+std::string tensor_debug_string(const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return "undefined";
+  }
+  std::ostringstream os;
+  os << "sizes=" << tensor.sizes() << ", dtype=" << tensor.dtype()
+     << ", device=" << tensor.device() << ", numel=" << tensor.numel();
+  return os.str();
+}
+
+std::string tensor_head_values(const torch::Tensor& tensor,
+                               int64_t max_values = 8) {
+  if (!tensor.defined() || tensor.numel() == 0) {
+    return "[]";
+  }
+  auto flat = tensor.reshape({-1});
+  const int64_t n = std::min<int64_t>(flat.numel(), max_values);
+  auto head = flat.slice(/*dim=*/0, /*start=*/0, /*end=*/n)
+                  .to(torch::kCPU, /*non_blocking=*/false);
+  std::ostringstream os;
+  os << head;
+  return os.str();
+}
+
+}  // namespace
 
 void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
                                     const ModelArgs& args,
@@ -170,17 +200,33 @@ torch::Tensor NpuLmHeadImpl::forward_with_hidden(
     const torch::Tensor& seleted_idxes,
     torch::Tensor& out_hidden,
     int nodeId) {
+  LOG(INFO) << "[PREFILL_OUTPUT_DEBUG][NpuLmHead] input hidden_states="
+            << tensor_debug_string(hidden_states)
+            << ", seleted_idxes=" << tensor_debug_string(seleted_idxes)
+            << ", seleted_idxes_head=" << tensor_head_values(seleted_idxes)
+            << ", weight0=" << tensor_debug_string(at_weight_tensors_[0])
+            << ", vocab_size=" << vocab_size_
+            << ", padded_vocab_size=" << padded_vocab_size_
+            << ", nodeId=" << nodeId;
   atb::Status st;
   build_node_variant_pack(lm_head_node_prefill_, hidden_states, seleted_idxes);
   st = execute_node(lm_head_node_prefill_, nodeId);
   LOG_IF(FATAL, st != 0) << model_name_
                          << "execute lmhead node fail, error code: " << st;
   torch::Tensor output = atOutTensors_[0];
+  LOG(INFO) << "[PREFILL_OUTPUT_DEBUG][NpuLmHead] raw output="
+            << tensor_debug_string(output)
+            << ", raw_output_head=" << tensor_head_values(output);
   if (padded_vocab_size_ > vocab_size_ && vocab_size_ > 0) {
     output = output.slice(/*dim=*/-1, /*start=*/0, /*end=*/vocab_size_);
+    LOG(INFO) << "[PREFILL_OUTPUT_DEBUG][NpuLmHead] sliced output="
+              << tensor_debug_string(output)
+              << ", sliced_output_head=" << tensor_head_values(output);
   }
   if (atOutTensors_.size() > 1) {
     out_hidden = atOutTensors_[1];
+    LOG(INFO) << "[PREFILL_OUTPUT_DEBUG][NpuLmHead] out_hidden="
+              << tensor_debug_string(out_hidden);
   }
   return output;
 }
@@ -230,6 +276,12 @@ void NpuLmHeadImpl::build_node_variant_pack(
   atb::Status st = node.operation->InferShape(inTensorDescs, outTensorDescs);
   LOG_IF(FATAL, st != atb::NO_ERROR)
       << model_name_ << " infer lmhead shape fail, error code: " << st;
+
+  LOG(INFO) << "[PREFILL_OUTPUT_DEBUG][NpuLmHead] InferShape input_descs="
+            << " hidden=" << tensor_debug_string(hidden_states)
+            << ", weight=" << tensor_debug_string(at_weight_tensors_[0])
+            << ", seleted_idxes=" << tensor_debug_string(seleted_idxes)
+            << ", output_num=" << node.operation->GetOutputNum();
 
   atOutTensors_.resize(node.variantPack.outTensors.size());
   for (size_t i = 0; i < node.variantPack.outTensors.size(); ++i) {

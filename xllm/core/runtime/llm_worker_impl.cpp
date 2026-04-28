@@ -21,8 +21,10 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <utility>
 
 #include "common/device_monitor.h"
@@ -40,6 +42,33 @@ limitations under the License.
 #include "util/timer.h"
 
 namespace xllm {
+namespace {
+
+std::string tensor_debug_string(const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return "undefined";
+  }
+  std::ostringstream os;
+  os << "sizes=" << tensor.sizes() << ", dtype=" << tensor.dtype()
+     << ", device=" << tensor.device() << ", numel=" << tensor.numel();
+  return os.str();
+}
+
+std::string tensor_head_values(const torch::Tensor& tensor,
+                               int64_t max_values = 8) {
+  if (!tensor.defined() || tensor.numel() == 0) {
+    return "[]";
+  }
+  auto flat = tensor.reshape({-1});
+  const int64_t n = std::min<int64_t>(flat.numel(), max_values);
+  auto head = flat.slice(/*dim=*/0, /*start=*/0, /*end=*/n)
+                  .to(torch::kCPU, /*non_blocking=*/false);
+  std::ostringstream os;
+  os << head;
+  return os.str();
+}
+
+}  // namespace
 
 LLMWorkerImpl::LLMWorkerImpl(const ParallelArgs& parallel_args,
                              const torch::Device& device,
@@ -120,8 +149,34 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   auto model_output = model_executor_->forward(
       input.token_ids, input.positions, kv_caches_, input.input_params);
   if (!model_output.hidden_states.defined()) {
+    LOG(INFO) << "[PREFILL_OUTPUT_DEBUG] model hidden_states undefined, "
+              << "batch_forward_type="
+              << input.input_params.batch_forward_type.to_string();
     return std::nullopt;
   }
+
+  LOG(INFO) << "[PREFILL_OUTPUT_DEBUG] after model forward: "
+            << "batch_forward_type="
+            << input.input_params.batch_forward_type.to_string()
+            << ", hidden_states="
+            << tensor_debug_string(model_output.hidden_states)
+            << ", token_ids=" << tensor_debug_string(input.token_ids)
+            << ", positions=" << tensor_debug_string(input.positions)
+            << ", selected_token_idxes="
+            << tensor_debug_string(sampling_params.selected_token_idxes)
+            << ", selected_token_idxes_head="
+            << tensor_head_values(sampling_params.selected_token_idxes)
+            << ", sample_idxes="
+            << tensor_debug_string(sampling_params.sample_idxes)
+            << ", sample_idxes_head="
+            << tensor_head_values(sampling_params.sample_idxes)
+            << ", do_sample=" << tensor_debug_string(sampling_params.do_sample)
+            << ", skip_sampling_for_logits_only="
+            << input.skip_sampling_for_logits_only
+            << ", enable_schedule_overlap=" << enable_schedule_overlap()
+            << ", driver=" << static_cast<bool>(driver_)
+            << ", dp_driver=" << static_cast<bool>(dp_driver_)
+            << ", spec_decode=" << options_.enable_speculative_decode();
 
   torch::Tensor logits;
   torch::Tensor selected_hidden_from_lm_head;
@@ -134,6 +189,14 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       logits = model_->logits(model_output.hidden_states,
                               sampling_params.selected_token_idxes);
     }
+    LOG(INFO) << "[PREFILL_OUTPUT_DEBUG] after lm_head: logits="
+              << tensor_debug_string(logits)
+              << ", logits_head=" << tensor_head_values(logits)
+              << ", selected_hidden_from_lm_head="
+              << tensor_debug_string(selected_hidden_from_lm_head);
+  } else {
+    LOG(INFO) << "[PREFILL_OUTPUT_DEBUG] skip lm_head because "
+              << "selected_token_idxes is undefined";
   }
 
   ForwardOutput output;
@@ -166,6 +229,8 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     if (FLAGS_enable_eplb) {
       return output;
     }
+    LOG(INFO) << "[PREFILL_OUTPUT_DEBUG] returning nullopt before sampling "
+              << "because overlap/driver/spec path is disabled";
     return std::nullopt;
   }
 
@@ -177,6 +242,16 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     output.max_top_logprobs = sampling_params.max_top_logprobs;
     if (!input.skip_sampling_for_logits_only) {
       auto sample_output = sampler_->forward(logits, sampling_params);
+      LOG(INFO) << "[PREFILL_OUTPUT_DEBUG] after sampler: next_tokens="
+                << tensor_debug_string(sample_output.next_tokens)
+                << ", next_tokens_head="
+                << tensor_head_values(sample_output.next_tokens)
+                << ", probs=" << tensor_debug_string(sample_output.probs)
+                << ", logprobs=" << tensor_debug_string(sample_output.logprobs)
+                << ", top_tokens="
+                << tensor_debug_string(sample_output.top_tokens)
+                << ", top_logprobs="
+                << tensor_debug_string(sample_output.top_logprobs);
 
       // beam search kernel
       BeamSearchOutput beam_search_output;
