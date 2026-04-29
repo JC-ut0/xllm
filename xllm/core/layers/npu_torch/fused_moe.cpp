@@ -26,6 +26,7 @@ limitations under the License.
 
 #include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
+#include "layers/common/dp_utils.h"
 
 namespace xllm {
 namespace layer {
@@ -919,9 +920,9 @@ torch::Tensor FusedMoEImpl::forward(const torch::Tensor& hidden_states,
   auto input = hidden_states;
   bool need_slice = false;
   if (parallel_args_.dp_size() > 1 && parallel_args_.ep_size() > 1) {
-    input = parallel_state::gather(input,
-                                   parallel_args_.dp_local_process_group_,
-                                   input_params.dp_global_token_nums);
+    const auto& dp_comm_tokens = get_dp_comm_token_nums(input_params);
+    input = parallel_state::gather(
+        input, parallel_args_.dp_local_process_group_, dp_comm_tokens);
     need_slice = true;
   }
 
@@ -942,12 +943,7 @@ torch::Tensor FusedMoEImpl::forward(const torch::Tensor& hidden_states,
   auto output = forward_expert(input, router_logits, shared_output);
 
   if (need_slice) {
-    const auto& dp_tokens = input_params.dp_global_token_nums;
-    const int64_t dp_rank = parallel_args_.dp_local_process_group_->rank();
-    auto start =
-        std::accumulate(dp_tokens.begin(), dp_tokens.begin() + dp_rank, 0);
-    auto end = start + dp_tokens[dp_rank];
-    output = output.slice(0, start, end);
+    output = get_dp_local_slice(output, input_params, parallel_args_);
   }
   return output;
 }
@@ -962,17 +958,17 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts(
   auto selected_topk_ids = topk_ids;
   bool need_slice = false;
   if (parallel_args_.dp_size() > 1 && parallel_args_.ep_size() > 1) {
-    input = parallel_state::gather(input,
-                                   parallel_args_.dp_local_process_group_,
-                                   input_params.dp_global_token_nums);
+    const auto& dp_comm_tokens = get_dp_comm_token_nums(input_params);
+    input = parallel_state::gather(
+        input, parallel_args_.dp_local_process_group_, dp_comm_tokens);
     selected_topk_weights =
         parallel_state::gather(selected_topk_weights,
                                parallel_args_.dp_local_process_group_,
-                               input_params.dp_global_token_nums);
+                               dp_comm_tokens);
     selected_topk_ids =
         parallel_state::gather(selected_topk_ids,
                                parallel_args_.dp_local_process_group_,
-                               input_params.dp_global_token_nums);
+                               dp_comm_tokens);
     need_slice = true;
   }
 
@@ -1010,12 +1006,7 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts(
   preselected_experts_ = std::nullopt;
 
   if (need_slice) {
-    const auto& dp_tokens = input_params.dp_global_token_nums;
-    const int64_t dp_rank = parallel_args_.dp_local_process_group_->rank();
-    auto start =
-        std::accumulate(dp_tokens.begin(), dp_tokens.begin() + dp_rank, 0);
-    auto end = start + dp_tokens[dp_rank];
-    output = output.slice(0, start, end);
+    output = get_dp_local_slice(output, input_params, parallel_args_);
   }
   return output;
 }

@@ -127,6 +127,8 @@ class DeepseekV4ModelImpl
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
+    dp_size_ = std::max<int64_t>(parallel_args.dp_size(), 1);
+    ep_size_ = std::max<int64_t>(parallel_args.ep_size(), 1);
 
     layers_.reserve(model_args.n_layers());
     norm_ = register_module("norm", layer::RMSNorm(context));
@@ -325,10 +327,14 @@ class DeepseekV4ModelImpl
     positions = maybe_to_device(positions, runtime_device);
 
     auto modified_input_params = input_params;
-    auto& dp_token_nums = modified_input_params.dp_global_token_nums;
-    // DP helper: keep zero entries at least 1 to avoid empty slices/padding
-    // in xllm DP utilities. DeepSeek V4 not use DP today.
-    std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
+    const bool dp_moe_enabled = dp_size_ > 1 && ep_size_ > 1;
+    if (!dp_moe_enabled) {
+      auto& dp_token_nums = modified_input_params.dp_global_token_nums;
+      // Compatibility with legacy DP helpers for non DP/EP MoE paths. In
+      // DP/EP MoE, zeros are real empty ranks and must be preserved for
+      // gather/slice boundaries.
+      std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
+    }
 
     if (!modified_input_params.attn_metadata) {
       modified_input_params.attn_metadata =
@@ -801,6 +807,8 @@ class DeepseekV4ModelImpl
   int64_t num_heads_ = 0;
   int64_t tp_num_heads_ = 0;
   int64_t dp_local_tp_size_ = 1;
+  int64_t dp_size_ = 1;
+  int64_t ep_size_ = 1;
   int64_t head_dim_ = 0;
   int64_t window_size_ = 128;
   int64_t index_n_heads_ = 0;

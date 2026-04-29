@@ -180,7 +180,18 @@ torch::Tensor gather_dp_tokens(const torch::Tensor& input,
   }
 
   return parallel_state::gather(
-      input, args.dp_local_process_group_, params.dp_global_token_nums);
+      input, args.dp_local_process_group_, get_dp_comm_token_nums(params));
+}
+
+const std::vector<int32_t>& get_dp_comm_token_nums(
+    const ModelInputParams& params) {
+  if (!params.dp_padded_token_nums.empty()) {
+    CHECK_EQ(params.dp_padded_token_nums.size(),
+             params.dp_global_token_nums.size())
+        << "dp_padded_token_nums size must match dp_global_token_nums size";
+    return params.dp_padded_token_nums;
+  }
+  return params.dp_global_token_nums;
 }
 
 torch::Tensor get_dp_local_slice(const torch::Tensor& input,
@@ -190,14 +201,19 @@ torch::Tensor get_dp_local_slice(const torch::Tensor& input,
     return input;
   }
 
-  const auto& dp_tokens = params.dp_global_token_nums;
+  const auto& real_dp_tokens = params.dp_global_token_nums;
+  const auto& comm_dp_tokens = get_dp_comm_token_nums(params);
   const int64_t dp_rank = args.dp_local_process_group_->rank();
+  CHECK_LT(dp_rank, static_cast<int64_t>(real_dp_tokens.size()))
+      << "dp rank exceeds dp_global_token_nums size";
+  CHECK_LT(dp_rank, static_cast<int64_t>(comm_dp_tokens.size()))
+      << "dp rank exceeds DP communication token nums size";
 
   int64_t start = 0;
   for (int64_t i = 0; i < dp_rank; ++i) {
-    start += dp_tokens[i];
+    start += comm_dp_tokens[i];
   }
-  int64_t end = start + dp_tokens[dp_rank];
+  int64_t end = start + real_dp_tokens[dp_rank];
 
   return input.slice(0, start, end);
 }

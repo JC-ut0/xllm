@@ -64,6 +64,11 @@ torch::Tensor gather_dp_tokens(const torch::Tensor& input,
                                const ModelInputParams& params,
                                const ParallelArgs& args);
 
+// Token counts used by DP collectives. Falls back to real token counts when no
+// padded communication counts are provided.
+const std::vector<int32_t>& get_dp_comm_token_nums(
+    const ModelInputParams& params);
+
 // given a tensor containing data from all DP ranks,
 // returns a slice containing only the tokens for the current DP rank
 torch::Tensor get_dp_local_slice(const torch::Tensor& input,

@@ -329,6 +329,7 @@ size_t calculate_raw_forward_input_size(const RawForwardInput& input) {
   total += get_vector_to_tensor_size(input.kv_cache_start_offsets);
   total += get_2d_vector_to_tensor_size(input.embeddings);
   total += get_vector_size(input.dp_global_token_nums);
+  total += get_vector_size(input.dp_padded_token_nums);
   total += get_vector_size(input.dp_is_decode);
   total += get_vector_size(input.embedding_ids);
   total += get_string_vector_size(input.request_ids);
@@ -1260,6 +1261,7 @@ inline void deserialize_raw_forward_input(const char*& buffer,
   read_tensor(buffer, input_params.kv_cache_start_offsets, device_buffer);
   read_tensor(buffer, input_params.input_embedding, device_buffer);
   read_vector(buffer, input_params.dp_global_token_nums, device_buffer);
+  read_vector(buffer, input_params.dp_padded_token_nums, device_buffer);
   read_vector(buffer, input_params.dp_is_decode, device_buffer);
   read_vector(buffer, input_params.embedding_ids, device_buffer);
   read_string_vector(buffer, input_params.request_ids, device_buffer);
@@ -1364,6 +1366,7 @@ inline void serialize_raw_forward_input(const RawForwardInput& input,
   write_vector_to_tensor(buffer, input.kv_cache_start_offsets);
   write_2d_vector_to_tensor(buffer, input.embeddings);
   write_vector(buffer, input.dp_global_token_nums);
+  write_vector(buffer, input.dp_padded_token_nums);
   write_vector(buffer, input.dp_is_decode);
   write_vector(buffer, input.embedding_ids);
   write_string_vector(buffer, input.request_ids);
@@ -1580,6 +1583,7 @@ void convert_raw_forward_input_to_forward_input(RawForwardInput& raw_input,
   input_params.embedding_ids = std::move(raw_input.embedding_ids);
   input_params.request_ids = std::move(raw_input.request_ids);
   input_params.dp_global_token_nums = std::move(raw_input.dp_global_token_nums);
+  input_params.dp_padded_token_nums = std::move(raw_input.dp_padded_token_nums);
   input_params.dp_is_decode = std::move(raw_input.dp_is_decode);
 
   input_params.kv_seq_lens =

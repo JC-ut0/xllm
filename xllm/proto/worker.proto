@@ -301,6 +301,9 @@ message ForwardInput {
   // multi block manager support for DeepSeek V4
   // [manager_num] x [batch_size] x [block_ids]
   repeated MultiBlockTables multi_block_tables_vec = 47;
+  // Optional communication/padding token counts per DP rank.
+  // dp_global_token_nums remains the real token count and may contain zeros.
+  repeated int32 dp_padded_token_nums = 48;
 }
 
  message BatchedForwardInputs {

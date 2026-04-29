@@ -177,6 +177,9 @@ void proto_to_forward_input(const proto::ForwardInput* pb_forward_input,
   std::vector<int32_t> dp_global_token_nums =
       std::vector<int32_t>(pb_forward_input->dp_global_token_nums().begin(),
                            pb_forward_input->dp_global_token_nums().end());
+  std::vector<int32_t> dp_padded_token_nums =
+      std::vector<int32_t>(pb_forward_input->dp_padded_token_nums().begin(),
+                           pb_forward_input->dp_padded_token_nums().end());
   std::vector<int32_t> dp_is_decode =
       std::vector<int32_t>(pb_forward_input->dp_is_decode().begin(),
                            pb_forward_input->dp_is_decode().end());
@@ -240,6 +243,7 @@ void proto_to_forward_input(const proto::ForwardInput* pb_forward_input,
   }
 
   input_params.dp_global_token_nums = std::move(dp_global_token_nums);
+  input_params.dp_padded_token_nums = std::move(dp_padded_token_nums);
   input_params.dp_is_decode = std::move(dp_is_decode);
   input_params.embedding_ids = std::move(embedding_ids);
   input_params.request_ids = std::move(request_ids);
@@ -476,6 +480,8 @@ void forward_input_to_proto(const RawForwardInput& inputs,
   }
   ADD_VECTOR_TO_PROTO(pb_forward_input->mutable_dp_global_token_nums(),
                       inputs.dp_global_token_nums);
+  ADD_VECTOR_TO_PROTO(pb_forward_input->mutable_dp_padded_token_nums(),
+                      inputs.dp_padded_token_nums);
   ADD_VECTOR_TO_PROTO(pb_forward_input->mutable_dp_is_decode(),
                       inputs.dp_is_decode);
   if (!inputs.transfer_kv_infos.empty()) {

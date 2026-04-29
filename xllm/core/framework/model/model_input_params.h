@@ -353,6 +353,7 @@ struct ModelInputParams {
     params.visual_pos_masks = visual_pos_masks;
     params.mm_data = MMBatchData::to(mm_data, device);
     params.dp_global_token_nums = dp_global_token_nums;
+    params.dp_padded_token_nums = dp_padded_token_nums;
     params.dp_is_decode = dp_is_decode;
     params.embedding_ids = std::move(embedding_ids);
     params.request_ids = std::move(request_ids);
@@ -442,7 +443,9 @@ struct ModelInputParams {
     print_tensor(new_cache_slots, "ModelInputParams: new_cache_slots", 4);
     print_tensor(block_tables, "ModelInputParams: block_tables", 4);
     LOG(INFO) << "ModelInputParams: dp_global_token_nums is "
-              << dp_global_token_nums << ", dp_is_decode: " << dp_is_decode;
+              << dp_global_token_nums
+              << ", dp_padded_token_nums: " << dp_padded_token_nums
+              << ", dp_is_decode: " << dp_is_decode;
 
     if (const auto* onerec = onerec_params()) {
       LOG(INFO) << "ModelInputParams: has onerec_params";
@@ -536,7 +539,11 @@ struct ModelInputParams {
   mutable torch::Tensor input_embedding;
 
   // num tokens of all workers，mainly used for dp case
+  // Real token counts per DP rank. Entries may be zero for empty DP ranks.
   std::vector<int32_t> dp_global_token_nums;
+  // Optional communication/padding token counts per DP rank. When empty,
+  // DP collectives use dp_global_token_nums.
+  std::vector<int32_t> dp_padded_token_nums;
   std::vector<int32_t> dp_is_decode;
 
   // embedding ids of each sequence
