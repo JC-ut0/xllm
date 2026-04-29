@@ -356,8 +356,7 @@ void DSAMetadataBuilder::process_swa_group(const torch::Tensor& raw_bt,
                                            int32_t batch_size,
                                            torch::Tensor& out_bt,
                                            torch::Tensor& out_slots) {
-  out_slots =
-      torch::where(raw_slots.eq(-1), torch::zeros_like(raw_slots), raw_slots);
+  out_slots = raw_slots;
 
   int32_t current_cols = raw_bt.size(1);
   int32_t max_dst_len = 0;
