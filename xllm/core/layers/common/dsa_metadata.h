@@ -68,6 +68,8 @@ struct DSAMetadata {
   int32_t layer_id = 0;
   // num_speculative_tokens: number of speculative decoding tokens
   int32_t num_speculative_tokens = 0;
+  // True for synthetic one-token metadata used by empty DP ranks.
+  bool is_dummy_rank = false;
 
   // cp_input_dict: context-parallel inputs placeholder (reserved, optional)
   std::unordered_map<std::string, torch::Tensor> cp_input_dict;

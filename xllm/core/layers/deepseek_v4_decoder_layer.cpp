@@ -203,22 +203,30 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
   attn_input = std::get<0>(attn_norm_->forward(attn_input));
 
   auto& dsa = *(attn_metadata.dsa_metadata);
-  const auto compress_metadata = std::make_tuple(
-      dsa.c1_metadata, dsa.c4_metadata, dsa.c128_metadata, dsa.qli_metadata);
-  KVState kv_state{kv_cache.get_swa_cache(),
-                   kv_cache.get_compress_kv_state(),
-                   kv_cache.get_compress_score_state(),
-                   kv_cache.get_compress_index_kv_state(),
-                   kv_cache.get_compress_index_score_state()};
-  auto [attn_output, attn_lse] = attention_->forward(
-      dsa,
-      attn_input,
-      kv_cache,
-      kv_state,
-      attn_metadata.is_prefill || attn_metadata.is_chunked_prefill,
-      std::to_string(dsa.layer_id),
-      compress_metadata);
-  (void)attn_lse;
+  torch::Tensor attn_output;
+  if (dsa.is_dummy_rank) {
+    // Dummy ranks must keep the HC/norm control flow alive but must not feed a
+    // fabricated attention result into downstream MoE collectives.
+    attn_output = torch::zeros_like(attn_input);
+  } else {
+    const auto compress_metadata = std::make_tuple(
+        dsa.c1_metadata, dsa.c4_metadata, dsa.c128_metadata, dsa.qli_metadata);
+    KVState kv_state{kv_cache.get_swa_cache(),
+                     kv_cache.get_compress_kv_state(),
+                     kv_cache.get_compress_score_state(),
+                     kv_cache.get_compress_index_kv_state(),
+                     kv_cache.get_compress_index_score_state()};
+    auto [real_attn_output, attn_lse] = attention_->forward(
+        dsa,
+        attn_input,
+        kv_cache,
+        kv_state,
+        attn_metadata.is_prefill || attn_metadata.is_chunked_prefill,
+        std::to_string(dsa.layer_id),
+        compress_metadata);
+    (void)attn_lse;
+    attn_output = real_attn_output;
+  }
   attn_input = attn_output;
   x = hc_post(attn_input, residual_attn, post_attn, comb_attn);
 

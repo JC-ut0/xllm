@@ -293,6 +293,15 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
   if (ep_size > 1) {
     ep_rank = parallel_args.moe_ep_group_->rank();
     tp_pg_ = parallel_args.moe_tp_group_;
+  } else if (is_deepseek_v4_ && parallel_args.dp_size() > 1 &&
+             parallel_args.process_group_ != nullptr &&
+             parallel_args.process_group_->world_size() ==
+                 parallel_args.dp_size() &&
+             parallel_args.tp_group_ != nullptr &&
+             parallel_args.tp_group_->world_size() == 1) {
+    // DeepSeek V4 can run attention as DP-only while sharing the same ranks as
+    // MoE TP. In that topology, the world group is the MoE TP group.
+    tp_pg_ = parallel_args.process_group_;
   }
 
   // calculate the number of experts per rank
@@ -961,18 +970,32 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts(
   auto selected_topk_weights = topk_weights;
   auto selected_topk_ids = topk_ids;
   bool need_slice = false;
-  if (parallel_args_.dp_size() > 1 && parallel_args_.ep_size() > 1) {
-    input = parallel_state::gather(input,
-                                   parallel_args_.dp_local_process_group_,
-                                   input_params.dp_global_token_nums);
-    selected_topk_weights =
-        parallel_state::gather(selected_topk_weights,
-                               parallel_args_.dp_local_process_group_,
-                               input_params.dp_global_token_nums);
-    selected_topk_ids =
-        parallel_state::gather(selected_topk_ids,
-                               parallel_args_.dp_local_process_group_,
-                               input_params.dp_global_token_nums);
+  ProcessGroup* gather_process_group = nullptr;
+  std::vector<int32_t> gather_token_nums = input_params.dp_global_token_nums;
+  const bool attention_dp_is_moe_tp =
+      is_deepseek_v4_ && parallel_args_.dp_size() > 1 && tp_pg_ != nullptr &&
+      parallel_args_.process_group_ != nullptr &&
+      tp_pg_ == parallel_args_.process_group_ &&
+      tp_pg_->world_size() == parallel_args_.dp_size();
+  if (attention_dp_is_moe_tp) {
+    gather_process_group = tp_pg_;
+    CHECK_EQ(gather_token_nums.size(), gather_process_group->world_size())
+        << "DeepSeek V4 attention-DP/MoE-TP requires per-rank token counts";
+    input =
+        parallel_state::gather(input, gather_process_group, gather_token_nums);
+    selected_topk_weights = parallel_state::gather(
+        selected_topk_weights, gather_process_group, gather_token_nums);
+    selected_topk_ids = parallel_state::gather(
+        selected_topk_ids, gather_process_group, gather_token_nums);
+    need_slice = true;
+  } else if (parallel_args_.dp_size() > 1 && parallel_args_.ep_size() > 1) {
+    gather_process_group = parallel_args_.dp_local_process_group_;
+    input =
+        parallel_state::gather(input, gather_process_group, gather_token_nums);
+    selected_topk_weights = parallel_state::gather(
+        selected_topk_weights, gather_process_group, gather_token_nums);
+    selected_topk_ids = parallel_state::gather(
+        selected_topk_ids, gather_process_group, gather_token_nums);
     need_slice = true;
   }
 
@@ -1010,11 +1033,14 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts(
   preselected_experts_ = std::nullopt;
 
   if (need_slice) {
-    const auto& dp_tokens = input_params.dp_global_token_nums;
-    const int64_t dp_rank = parallel_args_.dp_local_process_group_->rank();
-    auto start =
-        std::accumulate(dp_tokens.begin(), dp_tokens.begin() + dp_rank, 0);
-    auto end = start + dp_tokens[dp_rank];
+    CHECK(gather_process_group != nullptr)
+        << "gather process group is required when slicing MoE output";
+    const int64_t gather_rank = gather_process_group->rank();
+    auto start = std::accumulate(gather_token_nums.begin(),
+                                 gather_token_nums.begin() + gather_rank,
+                                 int64_t{0});
+    auto end = start + gather_token_nums[gather_rank];
+
     output = output.slice(0, start, end);
   }
   return output;

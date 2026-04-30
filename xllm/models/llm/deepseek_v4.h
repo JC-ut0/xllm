@@ -137,6 +137,12 @@ class DeepseekV4ModelImpl
     hc_eps_ = static_cast<double>(model_args.hc_eps());
     norm_eps_ = static_cast<double>(model_args.rms_norm_eps());
 
+    dp_rank_ = parallel_args.dp_local_process_group_ != nullptr
+                   ? parallel_args.dp_local_process_group_->rank()
+                   : (parallel_args.dp_size() > 1
+                          ? parallel_args.rank() % parallel_args.dp_size()
+                          : 0);
+
     num_heads_ = model_args.n_heads();
     head_dim_ = model_args.head_dim();
     head_dim_ = model_args.o_lora_rank() + model_args.qk_rope_head_dim();
@@ -306,14 +312,33 @@ class DeepseekV4ModelImpl
                       std::vector<KVCache>& kv_caches,
                       const ModelInputParams& input_params) override {
     torch::NoGradGuard no_grad;
-    if (tokens.numel() == 0) {
-      tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
-      positions = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
+    const bool is_empty_rank =
+        is_empty_rank_input(tokens, positions, input_params);
+
+    if (!is_empty_rank) {
+      const bool has_token_input = tokens.defined() && tokens.numel() > 0;
+      const bool has_embedding_input = input_params.input_embedding.defined() &&
+                                       input_params.input_embedding.numel() > 0;
+      CHECK((has_token_input || has_embedding_input) && positions.defined() &&
+            positions.numel() > 0)
+          << "[DSV4] non-empty DP rank has empty model inputs, dp_rank="
+          << dp_rank_
+          << ", token_numel=" << (tokens.defined() ? tokens.numel() : 0)
+          << ", input_embedding_numel="
+          << (input_params.input_embedding.defined()
+                  ? input_params.input_embedding.numel()
+                  : 0)
+          << ", position_numel="
+          << (positions.defined() ? positions.numel() : 0);
+    }
+    if (is_empty_rank) {
+      prepare_dummy_rank_input(tokens, positions);
     }
 
     auto inputs_embeds = input_params.input_embedding;
-    torch::Tensor h =
-        inputs_embeds.defined() ? inputs_embeds : embed_tokens_(tokens);
+    torch::Tensor h = (!is_empty_rank && inputs_embeds.defined())
+                          ? inputs_embeds
+                          : embed_tokens_(tokens);
 
     if (h.dim() == 2) {
       h = h.unsqueeze(1).repeat({1, hc_mult_, 1});
@@ -325,20 +350,46 @@ class DeepseekV4ModelImpl
     positions = maybe_to_device(positions, runtime_device);
 
     auto modified_input_params = input_params;
+    if (is_empty_rank) {
+      prepare_dummy_rank_params(modified_input_params);
+    } else if (modified_input_params.num_sequences == 0 &&
+               !modified_input_params.kv_seq_lens_vec.empty()) {
+      modified_input_params.num_sequences =
+          static_cast<int32_t>(modified_input_params.kv_seq_lens_vec.size());
+      if (modified_input_params.q_seq_lens_vec.empty()) {
+        modified_input_params.q_seq_lens_vec =
+            modified_input_params.kv_seq_lens_vec;
+      }
+      if (modified_input_params.kv_max_seq_len == 0) {
+        modified_input_params.kv_max_seq_len =
+            *std::max_element(modified_input_params.kv_seq_lens_vec.begin(),
+                              modified_input_params.kv_seq_lens_vec.end());
+      }
+      if (modified_input_params.q_max_seq_len == 0) {
+        modified_input_params.q_max_seq_len =
+            *std::max_element(modified_input_params.q_seq_lens_vec.begin(),
+                              modified_input_params.q_seq_lens_vec.end());
+      }
+    }
     auto& dp_token_nums = modified_input_params.dp_global_token_nums;
-    // DP helper: keep zero entries at least 1 to avoid empty slices/padding
-    // in xllm DP utilities. DeepSeek V4 not use DP today.
+    if (modified_input_params.dp_real_token_nums.empty()) {
+      modified_input_params.dp_real_token_nums = dp_token_nums;
+    }
+    // DP helper: keep zero entries at least 1 to preserve existing collective
+    // shape contracts. dp_real_token_nums keeps the semantic token counts.
     std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
 
-    if (!modified_input_params.attn_metadata) {
-      modified_input_params.attn_metadata =
-          std::make_shared<layer::AttentionMetadata>(
-              layer::DSAMetadataBuilder::build(modified_input_params,
-                                               positions,
-                                               dsa_cos_sin_,
-                                               caches_info_,
-                                               group_infos_));
-    }
+    // DeepSeek V4 DSA metadata is per-forward state: it owns position-derived
+    // RoPE slices, per-request block tables and precomputed sparse metadata,
+    // and layer_id is mutated while iterating layers. Never reuse metadata
+    // passed in from a previous forward.
+    modified_input_params.attn_metadata =
+        std::make_shared<layer::AttentionMetadata>(
+            layer::DSAMetadataBuilder::build(modified_input_params,
+                                             positions,
+                                             dsa_cos_sin_,
+                                             caches_info_,
+                                             group_infos_));
     auto& attn_metadata = *(modified_input_params.attn_metadata);
 
     // Per-ratio RoPE for the main q/kv path.  These all use input_positions;
@@ -456,7 +507,9 @@ class DeepseekV4ModelImpl
             (dsa.actual_seq_lengths_kv - dsa.seq_lens_q).to(torch::kInt32);
       }
 
-      build_precomputed_metadata(dsa);
+      if (!dsa.is_dummy_rank) {
+        build_precomputed_metadata(dsa);
+      }
     }
 
     std::optional<torch::Tensor> residual;
@@ -532,10 +585,57 @@ class DeepseekV4ModelImpl
     }
     h = hc_head(h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
+    if (is_empty_rank) {
+      hidden_states = hidden_states.slice(/*dim=*/0, /*start=*/0, /*end=*/0);
+      if (residual_out.has_value()) {
+        residual_out =
+            residual_out.value().slice(/*dim=*/0, /*start=*/0, /*end=*/0);
+      }
+    }
     return ModelOutput(hidden_states, residual_out);
   }
 
  private:
+  bool is_empty_rank_input(const torch::Tensor& tokens,
+                           const torch::Tensor& positions,
+                           const ModelInputParams& params) const {
+    if (params.is_dummy_rank) {
+      return true;
+    }
+    if (!params.dp_global_token_nums.empty()) {
+      CHECK_LT(dp_rank_,
+               static_cast<int32_t>(params.dp_global_token_nums.size()))
+          << "[DSV4] dp_rank exceeds dp_global_token_nums size, dp_rank="
+          << dp_rank_ << ", dp_global_token_nums size="
+          << params.dp_global_token_nums.size();
+      return params.dp_global_token_nums[dp_rank_] == 0;
+    }
+    return !tokens.defined() || tokens.numel() == 0 || !positions.defined() ||
+           positions.numel() == 0 || params.num_sequences == 0 ||
+           params.kv_seq_lens_vec.empty();
+  }
+
+  static void prepare_dummy_rank_input(torch::Tensor& tokens,
+                                       torch::Tensor& positions) {
+    const auto device =
+        tokens.defined() ? tokens.device()
+                         : (positions.defined() ? positions.device()
+                                                : torch::Device(torch::kCPU));
+    tokens = torch::zeros(
+        {1}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+    positions = torch::zeros(
+        {1}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+  }
+
+  static void prepare_dummy_rank_params(ModelInputParams& params) {
+    params.is_dummy_rank = true;
+    params.num_sequences = 1;
+    params.kv_seq_lens_vec = {1};
+    params.q_seq_lens_vec = {1};
+    params.kv_max_seq_len = std::max<int32_t>(params.kv_max_seq_len, 1);
+    params.q_max_seq_len = std::max<int32_t>(params.q_max_seq_len, 1);
+  }
+
   static c10::optional<torch::Tensor> as_optional_tensor(
       const torch::Tensor& tensor) {
     if (tensor.defined() && tensor.numel() > 0) {
@@ -548,13 +648,19 @@ class DeepseekV4ModelImpl
     if (!tensor.defined() || tensor.numel() == 0) {
       return 0;
     }
-    return tensor.max().item<int64_t>();
+    auto max_tensor =
+        tensor.max().to(torch::kCPU).to(torch::kInt64).contiguous();
+    return max_tensor.data_ptr<int64_t>()[0];
   }
 
   static int64_t pick_max_seqlen(const torch::Tensor& max_seqlen_tensor,
                                  const torch::Tensor& fallback_tensor) {
     if (max_seqlen_tensor.defined() && max_seqlen_tensor.numel() > 0) {
-      return max_seqlen_tensor.max().item<int64_t>();
+      auto max_tensor = max_seqlen_tensor.max()
+                            .to(torch::kCPU)
+                            .to(torch::kInt64)
+                            .contiguous();
+      return max_tensor.data_ptr<int64_t>()[0];
     }
     return tensor_max_or_zero(fallback_tensor);
   }
@@ -582,6 +688,13 @@ class DeepseekV4ModelImpl
     dsa.seq_lens = maybe_to_device(dsa.seq_lens, metadata_device);
     dsa.max_seqlen_q = maybe_to_device(dsa.max_seqlen_q, metadata_device);
     dsa.max_seqlen_kv = maybe_to_device(dsa.max_seqlen_kv, metadata_device);
+
+    if (dsa.is_dummy_rank) {
+      // Dummy ranks skip DSAttentionImpl::forward, so real sparse/indexer
+      // metadata tensors are never consumed. Keep only the minimal DSA object
+      // built by DSAMetadataBuilder to preserve layer control flow.
+      return;
+    }
 
     if (!dsa.actual_seq_lengths_query.defined() ||
         !dsa.actual_seq_lengths_kv.defined()) {
@@ -801,6 +914,7 @@ class DeepseekV4ModelImpl
   int64_t num_heads_ = 0;
   int64_t tp_num_heads_ = 0;
   int64_t dp_local_tp_size_ = 1;
+  int32_t dp_rank_ = 0;
   int64_t head_dim_ = 0;
   int64_t window_size_ = 128;
   int64_t index_n_heads_ = 0;

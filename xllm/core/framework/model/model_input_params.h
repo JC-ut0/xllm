@@ -332,6 +332,7 @@ struct ModelInputParams {
     params.kv_max_seq_len = kv_max_seq_len;
     params.q_max_seq_len = q_max_seq_len;
     params.enable_mla = enable_mla;
+    params.is_dummy_rank = is_dummy_rank;
 
     params.kv_seq_lens = safe_to(kv_seq_lens, device, true);
     params.q_seq_lens = safe_to(q_seq_lens, device, true);
@@ -353,6 +354,7 @@ struct ModelInputParams {
     params.visual_pos_masks = visual_pos_masks;
     params.mm_data = MMBatchData::to(mm_data, device);
     params.dp_global_token_nums = dp_global_token_nums;
+    params.dp_real_token_nums = dp_real_token_nums;
     params.dp_is_decode = dp_is_decode;
     params.embedding_ids = std::move(embedding_ids);
     params.request_ids = std::move(request_ids);
@@ -442,7 +444,9 @@ struct ModelInputParams {
     print_tensor(new_cache_slots, "ModelInputParams: new_cache_slots", 4);
     print_tensor(block_tables, "ModelInputParams: block_tables", 4);
     LOG(INFO) << "ModelInputParams: dp_global_token_nums is "
-              << dp_global_token_nums << ", dp_is_decode: " << dp_is_decode;
+              << dp_global_token_nums
+              << ", dp_real_token_nums: " << dp_real_token_nums
+              << ", dp_is_decode: " << dp_is_decode;
 
     if (const auto* onerec = onerec_params()) {
       LOG(INFO) << "ModelInputParams: has onerec_params";
@@ -537,7 +541,12 @@ struct ModelInputParams {
 
   // num tokens of all workers，mainly used for dp case
   std::vector<int32_t> dp_global_token_nums;
+  // Original per-DP-rank token counts before padding zero-token ranks to one.
+  // Empty-rank tolerant paths use this to distinguish real tokens from dummy
+  // rows while preserving the existing collective shape contract.
+  std::vector<int32_t> dp_real_token_nums;
   std::vector<int32_t> dp_is_decode;
+  bool is_dummy_rank = false;
 
   // embedding ids of each sequence
   std::vector<int32_t> embedding_ids;

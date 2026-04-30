@@ -34,19 +34,26 @@ AttentionMetadata DSAMetadataBuilder::build(
     const std::vector<DSAGroupInfo>& group_infos,
     const torch::Tensor& dsa_c4_cos_sin,
     const torch::Tensor& dsa_c128_cos_sin) {
-  // 1. Build base AttentionMetadata (q_cu_seq_lens, block_table, etc.)
-  AttentionMetadata attn_metadata = AttentionMetadataBuilder::build(params);
-
-  // 2. Build DSA-specific fields
+  const bool use_dummy_metadata = needs_dummy_metadata(params, positions);
+  // 1. Build base AttentionMetadata (q_cu_seq_lens, block_table, etc.).
+  // Empty DP ranks only need a minimal metadata object to carry the dummy flag;
+  // avoid the generic attention builder because real attention will be skipped.
+  AttentionMetadata attn_metadata;
   auto dsa_metadata = std::make_shared<DSAMetadata>();
-  build_dsa_fields(params,
-                   positions,
-                   dsa_cos_sin,
-                   dsa_c4_cos_sin,
-                   dsa_c128_cos_sin,
-                   caches_info,
-                   group_infos,
-                   *dsa_metadata);
+  if (use_dummy_metadata) {
+    apply_dummy_attention_fields(attn_metadata, positions);
+    build_dummy_dsa_fields(positions, dsa_cos_sin, caches_info, *dsa_metadata);
+  } else {
+    attn_metadata = AttentionMetadataBuilder::build(params);
+    build_dsa_fields(params,
+                     positions,
+                     dsa_cos_sin,
+                     dsa_c4_cos_sin,
+                     dsa_c128_cos_sin,
+                     caches_info,
+                     group_infos,
+                     *dsa_metadata);
+  }
 
   // 3. Keep DSA metadata independent while syncing base attention tensors.
   if (attn_metadata.attn_mask.defined()) {
@@ -64,6 +71,95 @@ AttentionMetadata DSAMetadataBuilder::build(
   attn_metadata.dsa_metadata = std::move(dsa_metadata);
 
   return attn_metadata;
+}
+
+bool DSAMetadataBuilder::needs_dummy_metadata(const ModelInputParams& params,
+                                              const torch::Tensor& positions) {
+  return !positions.defined() || positions.numel() == 0 ||
+         params.is_dummy_rank || params.num_sequences == 0 ||
+         params.kv_seq_lens_vec.empty();
+}
+
+torch::Tensor DSAMetadataBuilder::make_dummy_positions(
+    const torch::Tensor& positions) {
+  auto options = torch::TensorOptions().dtype(torch::kInt32);
+  if (positions.defined()) {
+    options = positions.options();
+  }
+  return torch::zeros({1}, options);
+}
+
+void DSAMetadataBuilder::apply_dummy_attention_fields(
+    AttentionMetadata& attn_metadata,
+    const torch::Tensor& positions) {
+  auto dummy_positions = make_dummy_positions(positions);
+  auto int_options = dummy_positions.options().dtype(torch::kInt32);
+  auto device = dummy_positions.device();
+  auto host_int_options = torch::TensorOptions().dtype(torch::kInt32);
+
+  auto ones = torch::ones({1}, int_options);
+  auto cu_lens = torch::tensor({0, 1}, host_int_options).to(device);
+  auto dummy_bt = torch::zeros({1, 1}, int_options);
+  auto dummy_slots = torch::zeros({1}, int_options);
+
+  attn_metadata.q_cu_seq_lens = cu_lens;
+  attn_metadata.kv_cu_seq_lens = cu_lens;
+  attn_metadata.kv_seq_lens = ones;
+  attn_metadata.q_seq_lens = ones;
+  attn_metadata.block_table = dummy_bt;
+  attn_metadata.slot_mapping = dummy_slots;
+  attn_metadata.max_query_len = 1;
+  attn_metadata.max_seq_len = 1;
+  attn_metadata.total_kv_len = 1;
+  attn_metadata.is_dummy = true;
+  attn_metadata.is_causal = false;
+#if defined(USE_NPU)
+  attn_metadata.kv_seq_lens_host = torch::ones({1}, host_int_options);
+#endif
+}
+
+void DSAMetadataBuilder::build_dummy_dsa_fields(
+    const torch::Tensor& positions,
+    const torch::Tensor& dsa_cos_sin,
+    const std::vector<std::vector<DSACacheInfo>>& caches_info,
+    DSAMetadata& dsa) {
+  auto dummy_positions = make_dummy_positions(positions);
+  auto int_options = dummy_positions.options().dtype(torch::kInt32);
+  auto host_int_options = torch::TensorOptions().dtype(torch::kInt32);
+  const auto device = dummy_positions.device();
+
+  dsa.is_dummy_rank = true;
+  dsa.input_positions = dummy_positions;
+  dsa.c4_pad_positions = dummy_positions.clone();
+  dsa.c128_pad_positions = dummy_positions.clone();
+  dsa.seq_lens = torch::ones({1}, int_options);
+  dsa.seq_lens_q = torch::ones({1}, int_options);
+  dsa.actual_seq_lengths_kv = torch::ones({1}, int_options);
+  dsa.actual_seq_lengths_query =
+      torch::tensor({0, 1}, host_int_options).to(device);
+  dsa.max_seqlen_kv = torch::ones({1}, int_options);
+  dsa.max_seqlen_q = torch::ones({1}, int_options);
+
+  if (dsa_cos_sin.defined()) {
+    auto cos_sin_chunks = dsa_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
+    dsa.cos_table = cos_sin_chunks[0].contiguous();
+    dsa.sin_table = cos_sin_chunks[1].contiguous();
+  }
+
+  const auto dummy_bt = torch::zeros({1, 1}, int_options);
+  const auto dummy_slots = torch::zeros({1}, int_options);
+  const int32_t n_layers = static_cast<int32_t>(caches_info.size());
+  dsa.block_tables.resize(n_layers);
+  dsa.slot_mappings.resize(n_layers);
+  for (int32_t lid = 0; lid < n_layers; ++lid) {
+    dsa.block_tables[lid].resize(caches_info[lid].size());
+    dsa.slot_mappings[lid].resize(caches_info[lid].size());
+    for (size_t ci = 0; ci < caches_info[lid].size(); ++ci) {
+      dsa.block_tables[lid][ci] = dummy_bt;
+      dsa.slot_mappings[lid][ci] = dummy_slots;
+    }
+  }
+  dsa.caches_info = &caches_info;
 }
 
 void DSAMetadataBuilder::build_dsa_fields(

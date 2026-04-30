@@ -66,6 +66,20 @@ class DSAMetadataBuilder {
       const std::vector<DSAGroupInfo>& group_infos,
       DSAMetadata& dsa_metadata);
 
+  static bool needs_dummy_metadata(const ModelInputParams& params,
+                                   const torch::Tensor& positions);
+
+  static torch::Tensor make_dummy_positions(const torch::Tensor& positions);
+
+  static void build_dummy_dsa_fields(
+      const torch::Tensor& positions,
+      const torch::Tensor& dsa_cos_sin,
+      const std::vector<std::vector<DSACacheInfo>>& caches_info,
+      DSAMetadata& dsa_metadata);
+
+  static void apply_dummy_attention_fields(AttentionMetadata& attn_metadata,
+                                           const torch::Tensor& positions);
+
   // Step 1: expand block_table to slot array for one manager.
   static torch::Tensor expand_blocks_to_slots(const torch::Tensor& block_table,
                                               const DSAGroupInfo& gi,
