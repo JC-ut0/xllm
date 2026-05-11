@@ -78,36 +78,41 @@ class DSAMetadataBuilder {
 
   // Step 2: per-group processing.
   static void process_group(const torch::Tensor& raw_bt,
-                            const torch::Tensor& raw_slots,
                             const DSAGroupInfo& gi,
                             const std::vector<int>& ctx_lens,
                             const std::vector<int>& q_lens,
                             int32_t batch_size,
                             int64_t total_tokens,
+                            int64_t graph_slot_capacity,
+                            int32_t block_table_capacity_cols,
                             torch::Tensor& out_bt,
                             torch::Tensor& out_slots);
 
   static void process_token_group(const torch::Tensor& raw_bt,
-                                  const torch::Tensor& raw_slots,
                                   int32_t ratio,
+                                  int32_t block_size,
                                   const std::vector<int>& ctx_lens,
                                   const std::vector<int>& q_lens,
                                   int32_t batch_size,
                                   int64_t total_tokens,
+                                  int64_t graph_slot_capacity,
+                                  int32_t block_table_capacity_cols,
                                   torch::Tensor& out_bt,
                                   torch::Tensor& out_slots);
 
   static void process_swa_group(const torch::Tensor& raw_bt,
-                                const torch::Tensor& raw_slots,
                                 int32_t block_size,
                                 const std::vector<int>& ctx_lens,
                                 const std::vector<int>& q_lens,
                                 int32_t batch_size,
+                                int64_t graph_slot_capacity,
+                                int32_t block_table_capacity_cols,
                                 torch::Tensor& out_bt,
                                 torch::Tensor& out_slots);
 
   // Build actual_seq_lengths_kv and actual_seq_lengths_query.
   static void build_seq_lengths(const ModelInputParams& params,
+                                const torch::Device& target_device,
                                 int32_t batch_size,
                                 DSAMetadata& dsa_metadata);
 

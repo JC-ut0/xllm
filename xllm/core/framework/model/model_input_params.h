@@ -329,6 +329,7 @@ struct ModelInputParams {
     ModelInputParams params;
     params.batch_forward_type = batch_forward_type;
     params.num_sequences = num_sequences;
+    params.actual_num_sequences = actual_num_sequences;
     params.kv_max_seq_len = kv_max_seq_len;
     params.q_max_seq_len = q_max_seq_len;
     params.enable_mla = enable_mla;
@@ -344,6 +345,7 @@ struct ModelInputParams {
       params.multi_block_tables.push_back(
           safe_to(t, t.options().device(torch::kCPU), true));
     }
+    params.multi_block_tables_capacity_cols = multi_block_tables_capacity_cols;
     params.kv_seq_lens_vec = kv_seq_lens_vec;
     params.q_seq_lens_vec = q_seq_lens_vec;
 
@@ -401,6 +403,7 @@ struct ModelInputParams {
 
     // Copy graph_buffer to device
     // params.graph_buffer = safe_to(graph_buffer, device, true);
+    params.graph_buffer.acl_graph_mode = graph_buffer.acl_graph_mode;
     params.graph_buffer.attn_mask =
         safe_to(graph_buffer.attn_mask, device, true);
     params.graph_buffer.tiling_data =
@@ -485,6 +488,7 @@ struct ModelInputParams {
 
   // total number of sequences in the batch
   int32_t num_sequences = 0;
+  int32_t actual_num_sequences = 0;
 
   // max length for qkv.
   int32_t kv_max_seq_len = 0;
@@ -507,6 +511,11 @@ struct ModelInputParams {
   // multi block manager block_tables for DeepSeek V4
   // vector of (batch_size, max_block_length_i) tensors, one per manager
   std::vector<torch::Tensor> multi_block_tables;
+  // Graph bucket column capacity for DSA metadata built from
+  // multi_block_tables. The input multi_block_tables keep their request-shaped
+  // semantic width; builders use this capacity only to pad graph metadata
+  // outputs.
+  int32_t multi_block_tables_capacity_cols = 0;
 
   // the indptr of the paged kv-cache
   // used in flashinfer
@@ -623,6 +632,7 @@ struct ModelInputParams {
   }
 
   struct GraphBuffer {
+    bool acl_graph_mode = false;
     torch::Tensor attn_mask;
     torch::Tensor tiling_data;
   };

@@ -22,6 +22,7 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include "core/common/macros.h"
 #include "core/framework/kv_cache/kv_cache.h"
@@ -171,7 +172,12 @@ class GraphPersistentParam {
   void set_aux_hidden_states(const torch::Tensor& value);
 
  private:
-  // Initialize tiling tensor
+  bool uses_paged_attention_tiling() const {
+    return need_update_attention_plan_ && tiling_data_.defined() &&
+           tiling_data_.numel() > 0;
+  }
+
+  // Initialize ATB context and custom paged attention operation.
   void initialize_paged_attention_plan_context(const torch::Device& device);
 
   // Update attention mask efficiently from input parameters
@@ -184,7 +190,6 @@ class GraphPersistentParam {
                                    const torch::Tensor& block_tables,
                                    const ModelInputParams& input_params,
                                    aclrtStream stream);
-
   const ModelArgs& args_;
   const torch::Device& device_;
   const runtime::Options& options_;
@@ -198,6 +203,8 @@ class GraphPersistentParam {
   // speculative decode mode), the mask needs to be passed to the attention
   // operation
   torch::Tensor persistent_mask_;
+  torch::Tensor persistent_mask_zero_template_;
+  torch::Tensor persistent_mask_fill_template_;
   torch::Tensor hidden_states_;
 
   torch::Tensor q_seq_lens_;
@@ -205,6 +212,7 @@ class GraphPersistentParam {
 
   // for deepseekv3.2
   torch::Tensor q_cu_seq_lens_;
+  torch::Tensor q_cu_seq_lens_default_;
 
   // for mtp model
   torch::Tensor persistent_embedding_;
@@ -245,6 +253,8 @@ class AclGraph {
     initialize_capture_stream(device_index);
   }
 
+  ~AclGraph();
+
   // Capture computation graph for given bucket num_tokens
   bool capture(CausalLM* model,
                const ModelArgs& args,
@@ -256,7 +266,9 @@ class AclGraph {
                uint32_t bucket_num_tokens);
 
   // Replay captured graph with new input data
-  ModelOutput replay(const torch::Tensor& tokens,
+  ModelOutput replay(CausalLM* model,
+                     const ModelArgs& args,
+                     const torch::Tensor& tokens,
                      const torch::Tensor& positions,
                      std::vector<KVCache>& kv_cache,
                      const ModelInputParams& params);
@@ -272,6 +284,7 @@ class AclGraph {
 
   // Initialize capture stream if not already initialized
   void initialize_capture_stream(c10::DeviceIndex device_index);
+  void make_current_stream_wait_for_graph(aclrtStream current_stream);
 
   // NPUGraph with mempool for managing temporary tensors during forward pass
   c10_npu::NPUGraph graph_;
@@ -280,9 +293,12 @@ class AclGraph {
   // Reference to persistent parameters (shared across multiple AclGraph
   // instances)
   GraphPersistentParam& persistent_param_;
+  std::unique_ptr<ModelGraphMetadataState> model_graph_metadata_state_;
 
-  // Cached capture stream, initialized on first capture
+  // Fallback non-default stream for capture when callers are on default stream.
   std::optional<c10_npu::NPUStream> capture_stream_;
+  aclrtStream graph_stream_ = nullptr;
+  aclrtEvent replay_done_event_ = nullptr;
   c10::DeviceIndex device_index_;
 };
 
