@@ -161,6 +161,7 @@ struct ModelArgs {
   PROPERTY(float, factor) = 0.0f;
   PROPERTY(float, beta_fast) = 0.0f;
   PROPERTY(float, beta_slow) = 0.0f;
+  PROPERTY(float, swiglu_limit) = 0.0f;
   PROPERTY(std::string, scale_fmt);
   PROPERTY(int32_t, hc_mult) = 0;
   PROPERTY(int32_t, hc_sinkhorn_iters) = 0;

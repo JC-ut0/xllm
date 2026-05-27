@@ -85,6 +85,7 @@ class FusedMoEImpl : public torch::nn::Module {
   bool skip_bias_add_;
   bool skip_gate_load_;
   bool is_deepseek_v4_ = false;
+  double swiglu_limit_ = 0.0;
   bool shared_expert_gate_is_loaded_ = false;
   int64_t renormalize_;
   std::string hidden_act_;

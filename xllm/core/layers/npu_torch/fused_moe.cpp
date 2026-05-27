@@ -185,6 +185,24 @@ bool has_w_style_shared_expert_weights(const StateDict& state_dict) {
   return false;
 }
 
+torch::Tensor maybe_clamp_deepseek_v4_swiglu_input(
+    const torch::Tensor& input,
+    bool is_deepseek_v4,
+    bool is_gated,
+    const std::string& hidden_act,
+    double swiglu_limit) {
+  if (!is_deepseek_v4 || !is_gated || swiglu_limit <= 0.0 ||
+      (hidden_act != xllm::kernel::kActModeSilu && hidden_act != "swiglu")) {
+    return input;
+  }
+  CHECK_EQ(input.size(-1) % 2, 0)
+      << "DeepSeek-V4 SwiGLU input last dim must be even.";
+  auto gate_up = input.chunk(2, -1);
+  return torch::cat({torch::clamp_max(gate_up[0], swiglu_limit),
+                     torch::clamp(gate_up[1], -swiglu_limit, swiglu_limit)},
+                    -1);
+}
+
 // Qwen3.5-MoE fused checkpoint fallback helpers.
 bool load_fused_gate_up_fallback(const StateDict& state_dict,
                                  int64_t rank,
@@ -341,6 +359,7 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
       is_deepseek_v4_(util::is_taget_model_type(model_args.model_type(),
                                                 /*target=*/"deepseek_v4",
                                                 /*match_mtp=*/true)),
+      swiglu_limit_(is_deepseek_v4_ ? model_args.swiglu_limit() : 0.0),
       renormalize_(model_args.norm_topk_prob() ? 1 : 0),
       hidden_act_(model_args.hidden_act()),
       scoring_func_(model_args.scoring_func()),
@@ -836,7 +855,7 @@ torch::Tensor FusedMoEImpl::forward_expert(
     // Step 5-6: first grouped matmul + fused dequant + swiglu + quant.
     torch::Tensor act_quantized;
     torch::Tensor act_scale;
-    if (FLAGS_enable_fused_moe_gmm_swiglu) {
+    if (FLAGS_enable_fused_moe_gmm_swiglu && swiglu_limit_ <= 0.0) {
       CHECK(is_gated_ && (hidden_act_ == "silu" || hidden_act_ == "swiglu"))
           << "--enable_fused_moe_gmm_swiglu requires gated SiLU/SwiGLU MoE, "
           << "got is_gated=" << (is_gated_ ? "true" : "false")
@@ -872,6 +891,7 @@ torch::Tensor FusedMoEImpl::forward_expert(
       params.group_index = selected_expert_info.token_count_slice;
       params.activate_left = true;
       params.quant_mode = 1;
+      params.swiglu_limit = swiglu_limit_;
       std::tie(act_quantized, act_scale) =
           xllm::kernel::dequant_swiglu_quant(params);
     }
@@ -956,7 +976,8 @@ torch::Tensor FusedMoEImpl::forward_expert(
 
     torch::Tensor act_out;
     xllm::kernel::ActivationParams activation_params;
-    activation_params.input = gemm1_out;
+    activation_params.input = maybe_clamp_deepseek_v4_swiglu_input(
+        gemm1_out, is_deepseek_v4_, is_gated_, hidden_act_, swiglu_limit_);
     activation_params.output = act_out;
     activation_params.act_mode = hidden_act_;
     activation_params.is_gated = is_gated_;
@@ -1015,7 +1036,8 @@ torch::Tensor FusedMoEImpl::forward_expert(
     torch::Tensor act_out;
 
     xllm::kernel::ActivationParams activation_params;
-    activation_params.input = gemm1_out;
+    activation_params.input = maybe_clamp_deepseek_v4_swiglu_input(
+        gemm1_out, is_deepseek_v4_, is_gated_, hidden_act_, swiglu_limit_);
     activation_params.output = act_out;
     activation_params.act_mode = hidden_act_;
     activation_params.is_gated = is_gated_;
@@ -1275,7 +1297,7 @@ torch::Tensor FusedMoEImpl::forward_with_dispatch_ffn_combine(
   params.probs = weights_2d;
   params.group = get_moe_ep_group_name();
   params.max_output_size = 65536;
-  params.swiglu_limit = is_deepseek_v4_ ? 10.0 : 0.0;
+  params.swiglu_limit = swiglu_limit_;
   params.output = torch::empty_like(input_2d);
   params.expert_token_nums = torch::empty(
       {num_experts_per_rank_}, ids_2d.options().dtype(torch::kInt32));
@@ -1434,7 +1456,7 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
 
     torch::Tensor act_quantized;
     torch::Tensor act_scale;
-    if (FLAGS_enable_fused_moe_gmm_swiglu) {
+    if (FLAGS_enable_fused_moe_gmm_swiglu && swiglu_limit_ <= 0.0) {
       CHECK(is_gated_ && (hidden_act_ == "silu" || hidden_act_ == "swiglu"))
           << "--enable_fused_moe_gmm_swiglu requires gated SiLU/SwiGLU MoE, "
           << "got is_gated=" << (is_gated_ ? "true" : "false")
@@ -1469,6 +1491,7 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
       params.group_index = group_list.to(torch::kInt64);
       params.activate_left = true;
       params.quant_mode = 1;
+      params.swiglu_limit = swiglu_limit_;
       std::tie(act_quantized, act_scale) =
           xllm::kernel::dequant_swiglu_quant(params);
     }
@@ -1515,7 +1538,8 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
 
     torch::Tensor act_out;
     xllm::kernel::ActivationParams activation_params;
-    activation_params.input = gemm1_out;
+    activation_params.input = maybe_clamp_deepseek_v4_swiglu_input(
+        gemm1_out, is_deepseek_v4_, is_gated_, hidden_act_, swiglu_limit_);
     activation_params.output = act_out;
     activation_params.act_mode = hidden_act_;
     activation_params.is_gated = is_gated_;

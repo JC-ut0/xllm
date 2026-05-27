@@ -149,7 +149,8 @@ std::tuple<at::Tensor, at::Tensor> dequant_swiglu_quant(
     const c10::optional<at::Tensor>& quant_offset,
     const c10::optional<at::Tensor>& group_index,
     bool activate_left,
-    int64_t quant_mode);
+    int64_t quant_mode,
+    double swiglu_limit);
 
 std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
     const at::Tensor& x,

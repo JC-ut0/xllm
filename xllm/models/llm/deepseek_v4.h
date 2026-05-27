@@ -841,7 +841,8 @@ class DeepseekV4ModelImpl
   }
 
  public:
-  // TODO: Common Funcs for both dsv4/dsv4_mtp. Suggests move shared DeepSeek V4 graph metadata utilities out of DeepseekV4ModelImpl.
+  // TODO: Common Funcs for both dsv4/dsv4_mtp. Suggests move shared DeepSeek V4
+  // graph metadata utilities out of DeepseekV4ModelImpl.
   static bool tensor_aliases_storage(const torch::Tensor& lhs,
                                      const torch::Tensor& rhs) {
     return lhs.defined() && rhs.defined() && lhs.data_ptr() == rhs.data_ptr() &&
@@ -965,9 +966,11 @@ class DeepseekV4ModelImpl
   // Key concepts:
   //   actual_metadata_rows  -- rows that carry real token data.
   //                            For normal decode: = num_requests.
-  //                            For MTP validate:  = num_requests * (1 + num_spec_tokens).
+  //                            For MTP validate:  = num_requests * (1 +
+  //                            num_spec_tokens).
   //   padded_metadata_rows  -- total rows after bucket padding.
-  //                            >= actual_metadata_rows, rounded up to decode bucket.
+  //                            >= actual_metadata_rows, rounded up to decode
+  //                            bucket.
   //   Rows in [actual_metadata_rows, padded_metadata_rows) are bucket padding
   //   and must be zeroed so DSAMetadataBuilder treats them as inactive.
   //
@@ -980,8 +983,8 @@ class DeepseekV4ModelImpl
   //   kv_seq_lens_vec = [23, 24, 0, 0]
   //   Both rows are real; num_speculative_tokens is from speculative config.
   static void normalize_graph_metadata_input_params(ModelInputParams& params) {
-    int64_t actual_metadata_rows = std::max<int64_t>(params.actual_num_sequences,
-                                                    0);
+    int64_t actual_metadata_rows =
+        std::max<int64_t>(params.actual_num_sequences, 0);
     int64_t padded_metadata_rows = actual_metadata_rows;
     if (params.enable_graph) {
       padded_metadata_rows =
@@ -990,8 +993,8 @@ class DeepseekV4ModelImpl
     if (padded_metadata_rows <= 0) {
       padded_metadata_rows = 1;
     }
-    actual_metadata_rows = std::min<int64_t>(actual_metadata_rows,
-                                             padded_metadata_rows);
+    actual_metadata_rows =
+        std::min<int64_t>(actual_metadata_rows, padded_metadata_rows);
 
     auto trim_lens_vec = [padded_metadata_rows,
                           actual_metadata_rows](std::vector<int>& lens) {
@@ -1623,6 +1626,7 @@ inline void load_deepseek_v4_model_args(const JsonReader& json,
   LOAD_ARG_OR(beta_fast, "rope_scaling.beta_fast", 32.0f);
   LOAD_ARG_OR(beta_slow, "rope_scaling.beta_slow", 1.0f);
   LOAD_ARG_OR(rope_scaling_attn_factor, "rope_scaling.attn_factor", 1.0f);
+  LOAD_ARG_OR(swiglu_limit, "swiglu_limit", 10.0f);
   LOAD_ARG_OR(scale_fmt, "scale_fmt", "ue8m0");
 
   // Runtime sizing hints

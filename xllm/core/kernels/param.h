@@ -465,6 +465,8 @@ struct DequantSwigluQuantParams {
   bool activate_left = true;
   // Quantization mode: 0 static quant, 1 dynamic quant.
   int64_t quant_mode = 1;
+  // Clamp limit for SwiGLU. Non-positive values keep the backend default.
+  double swiglu_limit = 0.0;
 };
 
 struct GroupedMatmulSwigluQuantParams {
