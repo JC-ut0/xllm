@@ -310,9 +310,7 @@ void log_w4a8_moe_combine_debug(
     int64_t logged = 0;
     for (int64_t expanded = 0; expanded < combine_idx_cpu.numel(); ++expanded) {
       const int64_t idx = combine_idx_cpu[expanded].item<int64_t>();
-      const bool match_row = idx == row;
-      const bool match_row_topk = topk > 0 && idx >= 0 && idx / topk == row;
-      if (!match_row && !match_row_topk) {
+      if (idx != row) {
         continue;
       }
       const int64_t expert =
