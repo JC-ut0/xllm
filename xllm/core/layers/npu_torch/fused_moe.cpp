@@ -20,6 +20,7 @@ limitations under the License.
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -59,6 +60,309 @@ torch::Tensor slice_expert_weights(const torch::Tensor& weight,
   return weight
       .slice(0, start_expert_id, start_expert_id + num_experts_per_rank)
       .contiguous();
+}
+
+bool debug_w4a8_moe_detail() {
+  const char* value = std::getenv("XLLM_DEBUG_W4A8_MOE_DETAIL");
+  return value != nullptr &&
+         (std::string(value) == "1" || std::string(value) == "true" ||
+          std::string(value) == "TRUE" || std::string(value) == "True");
+}
+
+bool debug_w4a8_moe_stats() {
+  const char* value = std::getenv("XLLM_DEBUG_W4A8_MOE_STATS");
+  return value != nullptr &&
+         (std::string(value) == "1" || std::string(value) == "true" ||
+          std::string(value) == "TRUE" || std::string(value) == "True");
+}
+
+bool debug_w4a8_moe_weight_stats() {
+  const char* value = std::getenv("XLLM_DEBUG_W4A8_MOE_WEIGHT_STATS");
+  return value != nullptr &&
+         (std::string(value) == "1" || std::string(value) == "true" ||
+          std::string(value) == "TRUE" || std::string(value) == "True");
+}
+
+bool debug_w4a8_moe_combine() {
+  const char* value = std::getenv("XLLM_DEBUG_W4A8_MOE_COMBINE");
+  return value != nullptr &&
+         (std::string(value) == "1" || std::string(value) == "true" ||
+          std::string(value) == "TRUE" || std::string(value) == "True");
+}
+
+double debug_double_env(const char* name, double default_value) {
+  const char* value = std::getenv(name);
+  if (value == nullptr) {
+    return default_value;
+  }
+  char* end = nullptr;
+  const double parsed = std::strtod(value, &end);
+  return end == value ? default_value : parsed;
+}
+
+int64_t debug_int64_env(const char* name, int64_t default_value) {
+  const char* value = std::getenv(name);
+  if (value == nullptr) {
+    return default_value;
+  }
+  char* end = nullptr;
+  const int64_t parsed = std::strtoll(value, &end, 10);
+  return end == value ? default_value : parsed;
+}
+
+std::vector<int64_t> debug_int64_list_env(const char* name) {
+  std::vector<int64_t> ids;
+  const char* values = std::getenv(name);
+  if (values == nullptr) {
+    return ids;
+  }
+  std::string text(values);
+  size_t start = 0;
+  while (start < text.size()) {
+    const size_t end = text.find(',', start);
+    const std::string item = text.substr(
+        start, end == std::string::npos ? std::string::npos : end - start);
+    char* parse_end = nullptr;
+    const int64_t id = std::strtoll(item.c_str(), &parse_end, 10);
+    if (parse_end != item.c_str()) {
+      ids.push_back(id);
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    start = end + 1;
+  }
+  return ids;
+}
+
+void append_unique(std::vector<int64_t>& values, int64_t value) {
+  if (value >= 0 &&
+      std::find(values.begin(), values.end(), value) == values.end()) {
+    values.push_back(value);
+  }
+}
+
+bool contains_int64(const std::vector<int64_t>& values, int64_t value) {
+  return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+std::vector<int64_t> debug_watch_rows() {
+  auto rows = debug_int64_list_env("XLLM_DEBUG_MOE_WATCH_ROWS");
+  if (rows.empty()) {
+    rows.push_back(0);
+  }
+  return rows;
+}
+
+std::vector<int64_t> debug_watch_token_ids() {
+  auto ids = debug_int64_list_env("XLLM_DEBUG_TOKEN_IDS");
+  const int64_t id = debug_int64_env("XLLM_DEBUG_TOKEN_ID", -1);
+  append_unique(ids, id);
+  return ids;
+}
+
+torch::Tensor zero_abs_above_if_enabled(const char* tag,
+                                        const torch::Tensor& tensor,
+                                        double threshold) {
+  if (threshold <= 0.0 || !tensor.defined() || tensor.numel() == 0) {
+    return tensor;
+  }
+  auto mask = torch::abs(tensor.to(torch::kFloat32)) > threshold;
+  const int64_t count = mask.sum().item<int64_t>();
+  if (count == 0) {
+    return tensor;
+  }
+  LOG(WARNING) << "[XLLM_DEBUG][w4a8_moe_zero] " << tag
+               << " zero_count=" << count << "/" << tensor.numel()
+               << " threshold=" << threshold;
+  return torch::where(mask, torch::zeros_like(tensor), tensor);
+}
+
+std::string tensor_row_stats(const torch::Tensor& tensor_2d, int64_t row) {
+  if (!tensor_2d.defined() || tensor_2d.dim() != 2 || row < 0 ||
+      row >= tensor_2d.size(0)) {
+    return "stats=<out_of_range>";
+  }
+  auto row_tensor = tensor_2d[row];
+  const float row_min = row_tensor.min().item<float>();
+  const float row_max = row_tensor.max().item<float>();
+  const float row_mean = row_tensor.mean().item<float>();
+  const float row_max_abs = torch::abs(row_tensor).max().item<float>();
+  return "max_abs=" + std::to_string(row_max_abs) +
+         " min=" + std::to_string(row_min) + " max=" + std::to_string(row_max) +
+         " mean=" + std::to_string(row_mean);
+}
+
+int64_t expert_for_expanded_row(const torch::Tensor& token_count_cpu,
+                                int64_t expanded_row,
+                                int64_t start_expert_id) {
+  int64_t offset = 0;
+  for (int64_t expert = 0; expert < token_count_cpu.numel(); ++expert) {
+    offset += token_count_cpu[expert].item<int64_t>();
+    if (expanded_row < offset) {
+      return start_expert_id + expert;
+    }
+  }
+  return -1;
+}
+
+std::string reduce_weight_row_desc(const torch::Tensor& reduce_weight_cpu,
+                                   int64_t row) {
+  if (!reduce_weight_cpu.defined() || reduce_weight_cpu.dim() != 2 || row < 0 ||
+      row >= reduce_weight_cpu.size(0)) {
+    return "<missing>";
+  }
+  std::string desc;
+  for (int64_t k = 0; k < reduce_weight_cpu.size(1); ++k) {
+    if (!desc.empty()) {
+      desc += ",";
+    }
+    desc += std::to_string(reduce_weight_cpu[row][k].item<float>());
+  }
+  return desc;
+}
+
+void log_w4a8_moe_combine_debug(
+    int64_t start_expert_id,
+    int64_t topk,
+    const torch::Tensor& gemm2_out,
+    const torch::Tensor& combined_hidden_states,
+    const torch::Tensor& final_hidden_states,
+    const torch::Tensor& combine_idx,
+    const torch::Tensor& reduce_weight,
+    const torch::Tensor& token_count_slice,
+    const std::optional<torch::Tensor>& debug_input_ids) {
+  if (!debug_w4a8_moe_combine() || !gemm2_out.defined() ||
+      !combined_hidden_states.defined() || combined_hidden_states.dim() != 2 ||
+      !final_hidden_states.defined() || final_hidden_states.dim() != 2 ||
+      !combine_idx.defined()) {
+    return;
+  }
+
+  const double threshold =
+      debug_double_env("XLLM_DEBUG_W4A8_MOE_COMBINE_ABS_THRESHOLD", 1000.0);
+  const int64_t max_rows = std::max<int64_t>(
+      1, debug_int64_env("XLLM_DEBUG_W4A8_MOE_COMBINE_ROWS", 8));
+  const int64_t max_contribs = std::max<int64_t>(
+      1, debug_int64_env("XLLM_DEBUG_W4A8_MOE_COMBINE_CONTRIBS", topk));
+
+  std::vector<int64_t> rows = debug_watch_rows();
+  auto watch_token_ids = debug_watch_token_ids();
+  torch::Tensor input_ids_cpu;
+  if (debug_input_ids.has_value() && debug_input_ids->defined()) {
+    input_ids_cpu = debug_input_ids->detach().to(torch::kCPU).reshape({-1});
+    if (!watch_token_ids.empty()) {
+      const int64_t row_count = std::min<int64_t>(
+          input_ids_cpu.numel(), combined_hidden_states.size(0));
+      for (int64_t row = 0; row < row_count; ++row) {
+        const int64_t token_id = input_ids_cpu[row].item<int64_t>();
+        if (contains_int64(watch_token_ids, token_id)) {
+          append_unique(rows, row);
+        }
+      }
+    }
+  }
+
+  auto combined_cpu =
+      combined_hidden_states.detach().to(torch::kFloat32).to(torch::kCPU);
+  auto final_cpu =
+      final_hidden_states.detach().to(torch::kFloat32).to(torch::kCPU);
+  auto row_abs_max = std::get<0>(torch::abs(final_cpu).max(/*dim=*/1));
+  const int64_t top_rows = std::min<int64_t>(max_rows, row_abs_max.size(0));
+  auto [top_values, top_indices] = row_abs_max.topk(top_rows);
+  for (int64_t i = 0; i < top_rows; ++i) {
+    if (top_values[i].item<float>() >= threshold) {
+      append_unique(rows, top_indices[i].item<int64_t>());
+    }
+  }
+  if (static_cast<int64_t>(rows.size()) > max_rows) {
+    rows.resize(max_rows);
+  }
+
+  auto gemm2_cpu = gemm2_out.detach().to(torch::kFloat32).to(torch::kCPU);
+  auto combine_idx_cpu =
+      combine_idx.detach().to(torch::kLong).to(torch::kCPU).reshape({-1});
+  auto reduce_weight_cpu =
+      reduce_weight.defined()
+          ? reduce_weight.detach().to(torch::kFloat32).to(torch::kCPU)
+          : torch::Tensor();
+  auto token_count_cpu = token_count_slice.defined()
+                             ? token_count_slice.detach()
+                                   .to(torch::kLong)
+                                   .to(torch::kCPU)
+                                   .reshape({-1})
+                             : torch::Tensor();
+
+  for (const int64_t row : rows) {
+    if (row < 0 || row >= final_cpu.size(0)) {
+      continue;
+    }
+    std::string token = "<none>";
+    if (input_ids_cpu.defined() && input_ids_cpu.numel() > row) {
+      token = std::to_string(input_ids_cpu[row].item<int64_t>());
+    }
+    LOG(WARNING) << "[XLLM_DEBUG][w4a8_moe_combine] row=" << row
+                 << " token_id=" << token << " combined_"
+                 << tensor_row_stats(combined_cpu, row) << " final_"
+                 << tensor_row_stats(final_cpu, row) << " reduce_weights="
+                 << reduce_weight_row_desc(reduce_weight_cpu, row);
+
+    int64_t logged = 0;
+    for (int64_t expanded = 0; expanded < combine_idx_cpu.numel(); ++expanded) {
+      const int64_t idx = combine_idx_cpu[expanded].item<int64_t>();
+      const bool match_row = idx == row;
+      const bool match_row_topk = topk > 0 && idx >= 0 && idx / topk == row;
+      if (!match_row && !match_row_topk) {
+        continue;
+      }
+      const int64_t expert =
+          token_count_cpu.defined()
+              ? expert_for_expanded_row(
+                    token_count_cpu, expanded, start_expert_id)
+              : -1;
+      LOG(WARNING) << "[XLLM_DEBUG][w4a8_moe_combine] row=" << row
+                   << " expanded_row=" << expanded << " combine_idx=" << idx
+                   << " expert=" << expert << " gemm2_"
+                   << tensor_row_stats(gemm2_cpu, expanded);
+      if (++logged >= max_contribs) {
+        break;
+      }
+    }
+    if (logged == 0) {
+      LOG(WARNING) << "[XLLM_DEBUG][w4a8_moe_combine] row=" << row
+                   << " contributors=<none>";
+    }
+  }
+}
+
+void log_w4a8_moe_tensor(const char* tag, const torch::Tensor& tensor) {
+  if (!debug_w4a8_moe_detail()) {
+    return;
+  }
+  if (!tensor.defined() || tensor.numel() == 0) {
+    LOG(WARNING) << "[XLLM_DEBUG][w4a8_moe] " << tag << "=<undefined_or_empty>";
+    return;
+  }
+  LOG(WARNING) << "[XLLM_DEBUG][w4a8_moe] " << tag
+               << " shape=" << tensor.sizes()
+               << " dtype=" << tensor.scalar_type()
+               << " device=" << tensor.device() << " numel=" << tensor.numel()
+               << " dim=" << tensor.dim();
+
+  const bool is_processed_weight = std::string(tag).rfind("processed_", 0) == 0;
+  if (!debug_w4a8_moe_stats() ||
+      (is_processed_weight && !debug_w4a8_moe_weight_stats())) {
+    return;
+  }
+
+  auto flat = tensor.detach().to(torch::kFloat32).reshape({-1});
+  const auto finite = torch::isfinite(flat);
+  const int64_t finite_count = finite.sum().item<int64_t>();
+  LOG(WARNING) << "[XLLM_DEBUG][w4a8_moe_stats] " << tag
+               << " finite=" << finite_count << "/" << flat.numel()
+               << " min=" << flat.min().item<float>()
+               << " max=" << flat.max().item<float>()
+               << " mean=" << flat.mean().item<float>();
 }
 
 std::optional<std::string> resolve_moe_quant_method(
@@ -660,6 +964,21 @@ void FusedMoEImpl::resolve_quant_method_from_state_dict(
     const StateDict& state_dict) {
   resolved_moe_quant_method_ =
       resolve_moe_quant_method(quant_args_, state_dict);
+  if (debug_w4a8_moe_detail()) {
+    LOG(WARNING) << "[XLLM_DEBUG][w4a8_moe] module=" << this
+                 << " state_prefix=" << state_dict.prefix()
+                 << " quant_method=" << quant_args_.quant_method()
+                 << " quantize_type=" << quant_args_.quantize_type()
+                 << " group_size=" << quant_args_.group_size()
+                 << " quant_version=" << quant_args_.quant_version()
+                 << " resolved_moe_quant_method="
+                 << (resolved_moe_quant_method_.has_value()
+                         ? resolved_moe_quant_method_.value()
+                         : "<none>")
+                 << " moe_weight_bits=" << quant_args_.moe_weight_bits()
+                 << " tp_world_size=" << tp_pg_->world_size()
+                 << " ep_size=" << parallel_args_.ep_size();
+  }
   if (w4a8_dynamic_preprocessed_ &&
       is_w4a8_dynamic_quant_method(resolved_moe_quant_method_)) {
     // Preprocessed W4A8 routed weights are already in runtime-packed layout.
@@ -813,7 +1132,8 @@ torch::Tensor FusedMoEImpl::select_experts(
 torch::Tensor FusedMoEImpl::forward_expert(
     const torch::Tensor& hidden_states,
     const torch::Tensor& router_logits,
-    const std::optional<torch::Tensor>& shared_output) {
+    const std::optional<torch::Tensor>& shared_output,
+    const std::optional<torch::Tensor>& debug_input_ids) {
   // prepare the parameters for MoE computation
   torch::IntArrayRef hidden_states_shape = hidden_states.sizes();
   torch::ScalarType hidden_states_dtype = hidden_states.dtype().toScalarType();
@@ -947,6 +1267,10 @@ torch::Tensor FusedMoEImpl::forward_expert(
     CHECK(pertoken_scale.has_value() && pertoken_scale->defined())
         << "dynamic_quant must return per-token scale for W4A8_DYNAMIC "
         << "fused MoE.";
+    log_w4a8_moe_tensor("expand_hidden_states", expand_hidden_states);
+    log_w4a8_moe_tensor("quantized_expand_hidden_states",
+                        quantized_expand_hidden_states);
+    log_w4a8_moe_tensor("pertoken_scale", pertoken_scale.value());
 
     // W4A8_DYNAMIC weights are expected to be transposed/NZ-converted and
     // packed by preprocess_w4a8_dynamic_weights(), matching vllm-ascend's
@@ -973,6 +1297,7 @@ torch::Tensor FusedMoEImpl::forward_expert(
       group_gemm_params.output_dtype = w4a8_group_gemm_output_dtype;
       gemm1_out = xllm::kernel::group_gemm(group_gemm_params);
     }
+    log_w4a8_moe_tensor("gemm1_out", gemm1_out);
 
     torch::Tensor act_out;
     xllm::kernel::ActivationParams activation_params;
@@ -983,6 +1308,7 @@ torch::Tensor FusedMoEImpl::forward_expert(
     activation_params.is_gated = is_gated_;
     xllm::kernel::active(activation_params);
     act_out = activation_params.output;
+    log_w4a8_moe_tensor("act_out", act_out);
 
     torch::Tensor act_quantized;
     std::optional<torch::Tensor> act_scale;
@@ -993,6 +1319,8 @@ torch::Tensor FusedMoEImpl::forward_expert(
     CHECK(act_scale.has_value() && act_scale->defined())
         << "dynamic_quant must return activation scale after W4A8_DYNAMIC "
         << "SwiGLU.";
+    log_w4a8_moe_tensor("act_quantized", act_quantized);
+    log_w4a8_moe_tensor("act_scale", act_scale.value());
 
     {
       std::vector<torch::Tensor> x_list = {act_quantized};
@@ -1014,6 +1342,7 @@ torch::Tensor FusedMoEImpl::forward_expert(
       group_gemm_params.output_dtype = w4a8_group_gemm_output_dtype;
       gemm2_out = xllm::kernel::group_gemm(group_gemm_params);
     }
+    log_w4a8_moe_tensor("gemm2_out", gemm2_out);
   } else {
     // Step 4: group gemm 1
     {
@@ -1062,15 +1391,41 @@ torch::Tensor FusedMoEImpl::forward_expert(
     }
   }
 
+  if (is_deepseek_v4_ &&
+      is_w4a8_dynamic_quant_method(resolved_moe_quant_method_)) {
+    gemm2_out = zero_abs_above_if_enabled(
+        "gemm2_out",
+        gemm2_out,
+        debug_double_env("XLLM_DEBUG_W4A8_MOE_ZERO_GEMM2_ABS", 0.0));
+  }
+
   // Step 8: combine the intermediate results and get the final hidden states.
   xllm::kernel::MoeCombineResultParams moe_combine_params;
   moe_combine_params.input = gemm2_out;
   moe_combine_params.reduce_weight = selected_expert_info.reduce_weight;
   moe_combine_params.gather_ids = selected_expert_info.combine_idx;
-  torch::Tensor final_hidden_states =
+  torch::Tensor combined_hidden_states =
       xllm::kernel::moe_combine_result(moe_combine_params);
+  torch::Tensor final_hidden_states = combined_hidden_states;
   if (is_deepseek_v4_) {
     final_hidden_states = final_hidden_states * route_scale_;
+  }
+  if (is_deepseek_v4_ &&
+      is_w4a8_dynamic_quant_method(resolved_moe_quant_method_)) {
+    final_hidden_states = zero_abs_above_if_enabled(
+        "final_hidden_states",
+        final_hidden_states,
+        debug_double_env("XLLM_DEBUG_W4A8_MOE_ZERO_FINAL_ABS", 0.0));
+    log_w4a8_moe_combine_debug(start_expert_id_,
+                               topk_,
+                               gemm2_out,
+                               combined_hidden_states,
+                               final_hidden_states,
+                               selected_expert_info.combine_idx,
+                               selected_expert_info.reduce_weight,
+                               selected_expert_info.token_count_slice,
+                               debug_input_ids);
+    log_w4a8_moe_tensor("final_hidden_states", final_hidden_states);
   }
   // reshape the final hidden states to the original shape
   final_hidden_states = final_hidden_states.reshape(hidden_states_shape);
@@ -1594,7 +1949,8 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts(
     const torch::Tensor& hidden_states,
     const torch::Tensor& topk_weights,
     const torch::Tensor& topk_ids,
-    const ModelInputParams& input_params) {
+    const ModelInputParams& input_params,
+    const std::optional<torch::Tensor>& debug_input_ids) {
   torch::Tensor input = hidden_states;
   torch::Tensor selected_topk_weights = topk_weights;
   torch::Tensor selected_topk_ids = topk_ids;
@@ -1666,7 +2022,8 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts(
   std::vector<int64_t> router_shape = input.sizes().vec();
   router_shape.back() = num_total_experts_;
   torch::Tensor router_logits = torch::empty(router_shape, input.options());
-  torch::Tensor output = forward_expert(input, router_logits, shared_output);
+  torch::Tensor output =
+      forward_expert(input, router_logits, shared_output, debug_input_ids);
   preselected_experts_ = std::nullopt;
 
   if (need_slice) {
@@ -1759,6 +2116,12 @@ void FusedMoEImpl::preprocess_w4a8_dynamic_weights() {
     w2_scale_bias_.set_data(processed_w2_scale_bias.value());
     w2_scale_bias_is_loaded_ = true;
   }
+  log_w4a8_moe_tensor("processed_w13", w13_);
+  log_w4a8_moe_tensor("processed_w13_scale", w13_scale_);
+  log_w4a8_moe_tensor("processed_w13_scale_bias", w13_scale_bias_);
+  log_w4a8_moe_tensor("processed_w2", w2_);
+  log_w4a8_moe_tensor("processed_w2_scale", w2_scale_);
+  log_w4a8_moe_tensor("processed_w2_scale_bias", w2_scale_bias_);
   w4a8_dynamic_preprocessed_ = true;
   clear_w4a8_dynamic_source_weight_cache();
 }

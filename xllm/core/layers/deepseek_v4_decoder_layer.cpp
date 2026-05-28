@@ -18,11 +18,180 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <string>
 
 #include "kernels/ops_api.h"
 
 namespace xllm {
 namespace layer {
+namespace {
+
+bool debug_trace_all() {
+  const char* value = std::getenv("XLLM_DEBUG_TRACE_ALL");
+  return value != nullptr &&
+         (std::string(value) == "1" || std::string(value) == "true" ||
+          std::string(value) == "TRUE" || std::string(value) == "True");
+}
+
+bool debug_moe() {
+  const char* value = std::getenv("XLLM_DEBUG_MOE");
+  return debug_trace_all() ||
+         (value != nullptr &&
+          (std::string(value) == "1" || std::string(value) == "true" ||
+           std::string(value) == "TRUE" || std::string(value) == "True"));
+}
+
+int64_t debug_rows() {
+  const char* value = std::getenv("XLLM_DEBUG_MOE_ROWS");
+  if (value == nullptr) {
+    return 4;
+  }
+  char* end = nullptr;
+  const int64_t rows = std::strtoll(value, &end, 10);
+  return end == value ? 4 : std::max<int64_t>(1, rows);
+}
+
+int64_t debug_top_rows() {
+  const char* value = std::getenv("XLLM_DEBUG_MOE_TOP_ROWS");
+  if (value == nullptr) {
+    return 3;
+  }
+  char* end = nullptr;
+  const int64_t rows = std::strtoll(value, &end, 10);
+  return end == value ? 3 : std::max<int64_t>(0, rows);
+}
+
+double debug_abs_threshold() {
+  const char* value = std::getenv("XLLM_DEBUG_MOE_ABS_THRESHOLD");
+  if (value == nullptr) {
+    return 1000.0;
+  }
+  char* end = nullptr;
+  const double threshold = std::strtod(value, &end);
+  return end == value ? 1000.0 : threshold;
+}
+
+void log_tensor_summary(const char* tag,
+                        int32_t layer_id,
+                        const torch::Tensor& tensor) {
+  if (!tensor.defined() || tensor.numel() == 0) {
+    LOG(WARNING) << "[XLLM_DEBUG][dsv4_moe] layer=" << layer_id << " " << tag
+                 << "=<undefined_or_empty>";
+    return;
+  }
+  auto flat = tensor.detach().to(torch::kFloat32).reshape({-1});
+  const auto finite = torch::isfinite(flat);
+  const int64_t finite_count = finite.sum().item<int64_t>();
+  LOG(WARNING) << "[XLLM_DEBUG][dsv4_moe] layer=" << layer_id << " " << tag
+               << " shape=" << tensor.sizes() << " finite=" << finite_count
+               << "/" << flat.numel() << " min=" << flat.min().item<float>()
+               << " max=" << flat.max().item<float>()
+               << " mean=" << flat.mean().item<float>();
+}
+
+void log_moe_row(int32_t layer_id,
+                 int64_t row,
+                 const torch::Tensor& input_ids_cpu,
+                 const torch::Tensor& ids_cpu,
+                 const torch::Tensor& weights_cpu,
+                 const std::string& extra) {
+  if (!ids_cpu.defined() || ids_cpu.dim() != 2 || row >= ids_cpu.size(0)) {
+    LOG(WARNING) << "[XLLM_DEBUG][dsv4_moe] layer=" << layer_id
+                 << " row=" << row << " routing=<out_of_range>" << extra;
+    return;
+  }
+  const int64_t topk = ids_cpu.size(1);
+  std::string experts;
+  std::string weights;
+  for (int64_t k = 0; k < topk; ++k) {
+    if (!experts.empty()) {
+      experts += ",";
+      weights += ",";
+    }
+    experts += std::to_string(ids_cpu[row][k].item<int32_t>());
+    if (weights_cpu.defined() && weights_cpu.dim() == 2 &&
+        row < weights_cpu.size(0) && k < weights_cpu.size(1)) {
+      weights += std::to_string(weights_cpu[row][k].item<float>());
+    } else {
+      weights += "<missing>";
+    }
+  }
+  std::string token = "<none>";
+  if (input_ids_cpu.defined() && input_ids_cpu.numel() > row) {
+    token = std::to_string(input_ids_cpu[row].item<int64_t>());
+  }
+  LOG(WARNING) << "[XLLM_DEBUG][dsv4_moe] layer=" << layer_id << " row=" << row
+               << " token_id=" << token << " experts=" << experts
+               << " weights=" << weights << extra;
+}
+
+void log_moe_extreme_rows(int32_t layer_id,
+                          const torch::Tensor& input_ids_cpu,
+                          const torch::Tensor& ids_cpu,
+                          const torch::Tensor& weights_cpu,
+                          const torch::Tensor& ffn_output) {
+  const int64_t rows = debug_top_rows();
+  if (rows <= 0 || !ffn_output.defined() || ffn_output.dim() != 2 ||
+      ffn_output.size(0) <= 1) {
+    return;
+  }
+
+  auto output = ffn_output.detach().to(torch::kFloat32);
+  auto row_abs_max = std::get<0>(torch::abs(output).max(/*dim=*/1));
+  const int64_t top_rows = std::min<int64_t>(rows, row_abs_max.size(0));
+  auto [top_values, top_indices] = row_abs_max.topk(top_rows);
+  top_values = top_values.to(torch::kCPU);
+  top_indices = top_indices.to(torch::kCPU);
+
+  const double threshold = debug_abs_threshold();
+  for (int64_t i = 0; i < top_rows; ++i) {
+    const double max_abs = top_values[i].item<float>();
+    if (max_abs < threshold) {
+      continue;
+    }
+    const int64_t row = top_indices[i].item<int64_t>();
+    auto row_tensor = output[row];
+    const float row_min = row_tensor.min().item<float>();
+    const float row_max = row_tensor.max().item<float>();
+    const float row_mean = row_tensor.mean().item<float>();
+    std::string extra = " max_abs=" + std::to_string(max_abs) +
+                        " min=" + std::to_string(row_min) +
+                        " max=" + std::to_string(row_max) +
+                        " mean=" + std::to_string(row_mean);
+    log_moe_row(layer_id, row, input_ids_cpu, ids_cpu, weights_cpu, extra);
+  }
+}
+
+void log_moe_routing_debug(int32_t layer_id,
+                           const torch::Tensor& input_ids,
+                           const torch::Tensor& topk_weights,
+                           const torch::Tensor& topk_ids,
+                           const torch::Tensor& ffn_input,
+                           const torch::Tensor& ffn_output) {
+  if (!debug_moe()) {
+    return;
+  }
+  log_tensor_summary("ffn_input", layer_id, ffn_input);
+  log_tensor_summary("ffn_output", layer_id, ffn_output);
+  if (!topk_ids.defined() || topk_ids.numel() == 0) {
+    return;
+  }
+
+  auto ids_cpu = topk_ids.detach().to(torch::kCPU);
+  auto weights_cpu = topk_weights.detach().to(torch::kFloat32).to(torch::kCPU);
+  torch::Tensor input_ids_cpu =
+      input_ids.defined() ? input_ids.detach().to(torch::kCPU).reshape({-1})
+                          : torch::Tensor();
+  const int64_t rows = std::min<int64_t>(debug_rows(), ids_cpu.size(0));
+  for (int64_t row = 0; row < rows; ++row) {
+    log_moe_row(layer_id, row, input_ids_cpu, ids_cpu, weights_cpu, "");
+  }
+  log_moe_extreme_rows(
+      layer_id, input_ids_cpu, ids_cpu, weights_cpu, ffn_output);
+}
+
+}  // namespace
 
 DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
     const ModelContext& context,
@@ -32,6 +201,7 @@ DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
   const auto& parallel_args = context.get_parallel_args();
   const auto& options = context.get_tensor_options();
 
+  layer_id_ = layer_id;
   int64_t hidden_size = args.hidden_size();
 
   hc_mult_ = args.hc_mult();
@@ -197,7 +367,14 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
   }
   auto [topk_weights, topk_ids] = gate_->forward(ffn_input_2d, gate_input_ids);
   ffn_input = moe_mlp_->forward_with_selected_experts(
-      ffn_input, topk_weights, topk_ids, input_params);
+      ffn_input, topk_weights, topk_ids, input_params, gate_input_ids);
+  log_moe_routing_debug(
+      layer_id_,
+      gate_input_ids.has_value() ? gate_input_ids.value() : torch::Tensor(),
+      topk_weights,
+      topk_ids,
+      ffn_input_2d,
+      ffn_input.reshape({-1, ffn_input.size(-1)}));
   x = hc_post(ffn_input, residual_ffn, post_ffn, comb_ffn);
 
   return x;

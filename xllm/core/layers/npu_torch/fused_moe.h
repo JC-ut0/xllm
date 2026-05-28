@@ -46,12 +46,14 @@ class FusedMoEImpl : public torch::nn::Module {
   torch::Tensor forward_expert(
       const torch::Tensor& hidden_states,
       const torch::Tensor& router_logits,
-      const std::optional<torch::Tensor>& shared_output);
+      const std::optional<torch::Tensor>& shared_output,
+      const std::optional<torch::Tensor>& debug_input_ids = std::nullopt);
   torch::Tensor forward_with_selected_experts(
       const torch::Tensor& hidden_states,
       const torch::Tensor& topk_weights,
       const torch::Tensor& topk_ids,
-      const ModelInputParams& input_params);
+      const ModelInputParams& input_params,
+      const std::optional<torch::Tensor>& debug_input_ids = std::nullopt);
   torch::Tensor forward(const torch::Tensor& hidden_states,
                         const ModelInputParams& input_params);
   void load_state_dict(const StateDict& state_dict);

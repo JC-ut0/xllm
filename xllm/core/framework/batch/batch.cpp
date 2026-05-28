@@ -20,6 +20,8 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <string>
 #include <vector>
 
 #include "batch_input_builder.h"
@@ -39,6 +41,55 @@ limitations under the License.
 
 namespace xllm {
 namespace {
+
+bool debug_trace_all() {
+  const char* value = std::getenv("XLLM_DEBUG_TRACE_ALL");
+  return value != nullptr &&
+         (std::string(value) == "1" || std::string(value) == "true" ||
+          std::string(value) == "TRUE" || std::string(value) == "True");
+}
+
+int64_t debug_token_id() {
+  const char* value = std::getenv("XLLM_DEBUG_TOKEN_ID");
+  if (value == nullptr) {
+    return -1;
+  }
+  char* end = nullptr;
+  const int64_t id = std::strtoll(value, &end, 10);
+  return end == value ? -1 : id;
+}
+
+std::vector<int64_t> debug_token_ids() {
+  std::vector<int64_t> ids;
+  const char* values = std::getenv("XLLM_DEBUG_TOKEN_IDS");
+  if (values != nullptr) {
+    std::string text(values);
+    size_t start = 0;
+    while (start < text.size()) {
+      const size_t end = text.find(',', start);
+      const std::string item = text.substr(
+          start, end == std::string::npos ? std::string::npos : end - start);
+      char* parse_end = nullptr;
+      const int64_t id = std::strtoll(item.c_str(), &parse_end, 10);
+      if (parse_end != item.c_str()) {
+        ids.push_back(id);
+      }
+      if (end == std::string::npos) {
+        break;
+      }
+      start = end + 1;
+    }
+  }
+  const int64_t id = debug_token_id();
+  if (id >= 0 && std::find(ids.begin(), ids.end(), id) == ids.end()) {
+    ids.push_back(id);
+  }
+  return ids;
+}
+
+bool contains_token(const std::vector<int64_t>& ids, int64_t id) {
+  return std::find(ids.begin(), ids.end(), id) != ids.end();
+}
 
 uint32_t get_sample_source_position(const SampleSlot& sample_slot) {
   if (sample_slot.token_position == 0) {
@@ -709,6 +760,22 @@ void Batch::append_token_for_sequence(Sequence* seq,
                                       const Token& token,
                                       int token_idx,
                                       bool replace_fake_token) {
+  const bool trace_all = debug_trace_all();
+  const auto watch_ids = debug_token_ids();
+  if (trace_all || contains_token(watch_ids, token.id)) {
+    const auto tokens = seq->tokens();
+    const int32_t prev_token_id = tokens.empty() ? -1 : tokens.back();
+    LOG(WARNING) << "[XLLM_DEBUG][append] request_id=" << seq->request_id()
+                 << " before_num_tokens=" << seq->num_tokens()
+                 << " before_generated=" << seq->num_generated_tokens()
+                 << " prompt_tokens=" << seq->num_prompt_tokens()
+                 << " prev_token_id=" << prev_token_id
+                 << " token_idx=" << token_idx << " token_id=" << token.id
+                 << " replace_fake_token=" << replace_fake_token << " logprob="
+                 << (token.logprob.has_value()
+                         ? std::to_string(token.logprob.value())
+                         : std::string("<none>"));
+  }
   // always append a token, maybe true or fake token
   if (!replace_fake_token) {
     seq->append_token(token);
