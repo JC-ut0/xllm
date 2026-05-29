@@ -217,12 +217,6 @@ bool check_npu_moe_gating_top_k(const torch::Tensor& hidden_states,
   return true;
 }
 
-torch::Tensor renormalize_topk_weights(const torch::Tensor& topk_weights) {
-  auto denom = topk_weights.sum(-1, true);
-  denom = torch::clamp_min(denom, 1e-20);
-  return topk_weights / denom;
-}
-
 }  // namespace
 
 DeepseekV4GateImpl::DeepseekV4GateImpl(const ModelContext& context,
@@ -314,7 +308,7 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4GateImpl::forward(
     }
   }
 
-  constexpr bool renormalize = true;
+  constexpr bool renormalize = false;
   const int64_t norm_type = score_func_to_norm_type(score_func_);
   if (!use_fused_moe_gating_top_k_hash()) {
     auto [topk_weights, topk_idx] = select_experts_native(logits, input_ids);
@@ -341,7 +335,7 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4GateImpl::forward(
   gate_params.group_count = 1;
   gate_params.group_select_mode = 1;
   gate_params.norm_type = norm_type;
-  gate_params.renorm = (gate_params.norm_type == 2) ? 0 : 1;
+  gate_params.renorm = 0;
   gate_params.out_flag = false;
   gate_params.routed_scaling_factor = route_scale_;
   gate_params.eps = 1e-20;
@@ -375,15 +369,8 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4GateImpl::forward(
   log_gate_idx_range(
       layer_id_, hash_layer_, "fused_output", topk_idx, n_routed_experts_);
 
-  if (gate_params.norm_type == 0 && renormalize) {
-    topk_weights = renormalize_topk_weights(topk_weights);
-  }
-
-  if (gate_params.norm_type == 2) {
-    topk_weights = renormalize_topk_weights(topk_weights);
-  }
   log_gate_tensor_stats(
-      layer_id_, hash_layer_, "fused_post_norm", "topk_weights", topk_weights);
+      layer_id_, hash_layer_, "fused_final", "topk_weights", topk_weights);
   if (debug_gate_compare()) {
     auto [native_weights, native_idx] =
         select_experts_native(logits, input_ids);
