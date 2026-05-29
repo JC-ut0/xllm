@@ -1081,11 +1081,6 @@ torch::Tensor FusedMoEImpl::select_experts(
     std::tie(topk_weights, topk_ids) =
         xllm::kernel::moe_active_topk(moe_active_topk_params);
     topk_ids = topk_ids.to(torch::kInt32);
-    if (is_deepseek_v4_) {
-      // DeepSeek-V4 applies route_scale to routing weights. The preselected
-      // path receives already-scaled weights from DeepseekV4Gate.
-      topk_weights = topk_weights * route_scale_;
-    }
   }
 
   const int64_t local_expert_start = start_expert_id_;
@@ -1410,6 +1405,9 @@ torch::Tensor FusedMoEImpl::forward_expert(
   torch::Tensor combined_hidden_states =
       xllm::kernel::moe_combine_result(moe_combine_params);
   torch::Tensor final_hidden_states = combined_hidden_states;
+  if (is_deepseek_v4_) {
+    final_hidden_states = final_hidden_states * route_scale_;
+  }
   if (is_deepseek_v4_ &&
       is_w4a8_dynamic_quant_method(resolved_moe_quant_method_)) {
     final_hidden_states = zero_abs_above_if_enabled(
@@ -1662,6 +1660,9 @@ torch::Tensor FusedMoEImpl::forward_with_dispatch_ffn_combine(
   std::tie(final_hidden_states_2d, expert_token_nums) =
       xllm::kernel::dispatch_ffn_combine(params);
   (void)expert_token_nums;
+  if (is_deepseek_v4_) {
+    final_hidden_states_2d = final_hidden_states_2d * route_scale_;
+  }
   return final_hidden_states_2d.reshape(hidden_states_shape);
 }
 
@@ -1698,6 +1699,9 @@ torch::Tensor FusedMoEImpl::forward_with_dispatch_gmm_combine_decode(
   std::tie(final_hidden_states_2d, expert_token_nums) =
       xllm::kernel::dispatch_gmm_combine_decode(params);
   (void)expert_token_nums;
+  if (is_deepseek_v4_) {
+    final_hidden_states_2d = final_hidden_states_2d * route_scale_;
+  }
   return final_hidden_states_2d.reshape(hidden_states_shape);
 }
 
@@ -1932,6 +1936,9 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
   combine_params.global_bs = global_bs;
   auto final_hidden_states_2d =
       xllm::kernel::moe_distribute_combine_v2(combine_params);
+  if (is_deepseek_v4_) {
+    final_hidden_states_2d = final_hidden_states_2d * route_scale_;
+  }
 
   return final_hidden_states_2d.reshape(hidden_states_shape);
 }
