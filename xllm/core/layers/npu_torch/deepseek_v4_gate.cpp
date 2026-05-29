@@ -239,9 +239,7 @@ DeepseekV4GateImpl::DeepseekV4GateImpl(const ModelArgs& args,
   n_routed_experts_ = args.n_routed_experts();
   topk_ = args.n_activated_experts();
   n_hash_layers_ = args.n_hash_layers();
-  // FusedMoE applies routed_scaling_factor once after expert combine for
-  // DeepSeek-V4, so the external gate must return unscaled routing weights.
-  route_scale_ = 1.0;
+  route_scale_ = static_cast<double>(args.routed_scaling_factor());
   score_func_ = args.scoring_func();
   hash_layer_ = layer_id >= 0 && layer_id < n_hash_layers_;
 
@@ -449,6 +447,7 @@ DeepseekV4GateImpl::select_experts_native(
     denom = torch::clamp_min(denom, 1e-20);
     topk_weights = topk_weights / denom;
   }
+  topk_weights = topk_weights * route_scale_;
   return std::make_tuple(topk_weights, gather_idx.to(torch::kInt32));
 }
 
