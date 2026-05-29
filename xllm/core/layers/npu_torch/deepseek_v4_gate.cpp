@@ -19,6 +19,8 @@ limitations under the License.
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
+#include <string>
 #ifdef TORCH_HIGHER_THAN_PTA6
 #include <torch_npu/csrc/core/npu/NPUFormat.h>
 #else
@@ -31,6 +33,13 @@ namespace xllm {
 namespace layer {
 
 namespace {
+
+bool use_fused_moe_gating_top_k_hash() {
+  const char* value = std::getenv("XLLM_DSV4_USE_FUSED_GATE");
+  return value != nullptr &&
+         (std::string(value) == "1" || std::string(value) == "true" ||
+          std::string(value) == "TRUE" || std::string(value) == "True");
+}
 
 bool check_npu_moe_gating_top_k(const torch::Tensor& hidden_states,
                                 int64_t top_k,
@@ -141,6 +150,10 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4GateImpl::forward(
 
   constexpr bool renormalize = true;
   const int64_t norm_type = score_func_to_norm_type(score_func_);
+  if (!use_fused_moe_gating_top_k_hash()) {
+    return select_experts_native(logits, input_ids);
+  }
+
   const bool is_support_npu_moe_gating_top_k =
       check_npu_moe_gating_top_k(hidden_states, topk_, renormalize, norm_type);
 
