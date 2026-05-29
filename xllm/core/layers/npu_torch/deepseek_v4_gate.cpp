@@ -41,6 +41,151 @@ bool use_fused_moe_gating_top_k_hash() {
           std::string(value) == "TRUE" || std::string(value) == "True");
 }
 
+bool debug_gate_stats() {
+  const char* value = std::getenv("XLLM_DEBUG_DSV4_GATE_STATS");
+  return value != nullptr &&
+         (std::string(value) == "1" || std::string(value) == "true" ||
+          std::string(value) == "TRUE" || std::string(value) == "True");
+}
+
+bool debug_gate_weight_stats() {
+  const char* value = std::getenv("XLLM_DEBUG_DSV4_GATE_WEIGHT_STATS");
+  return value != nullptr &&
+         (std::string(value) == "1" || std::string(value) == "true" ||
+          std::string(value) == "TRUE" || std::string(value) == "True");
+}
+
+bool debug_gate_compare() {
+  const char* value = std::getenv("XLLM_DEBUG_DSV4_GATE_COMPARE");
+  return value != nullptr &&
+         (std::string(value) == "1" || std::string(value) == "true" ||
+          std::string(value) == "TRUE" || std::string(value) == "True");
+}
+
+void log_gate_tensor_stats(int32_t layer_id,
+                           bool hash_layer,
+                           const char* stage,
+                           const char* tag,
+                           const torch::Tensor& tensor) {
+  if (!debug_gate_stats()) {
+    return;
+  }
+  if (!tensor.defined()) {
+    LOG(WARNING) << "[XLLM_DEBUG][dsv4_gate] layer=" << layer_id
+                 << " hash_layer=" << hash_layer << " stage=" << stage << " "
+                 << tag << "=<undefined>";
+    return;
+  }
+  if (tensor.numel() == 0) {
+    LOG(WARNING) << "[XLLM_DEBUG][dsv4_gate] layer=" << layer_id
+                 << " hash_layer=" << hash_layer << " stage=" << stage << " "
+                 << tag << " shape=" << tensor.sizes()
+                 << " dtype=" << tensor.scalar_type() << " empty=1";
+    return;
+  }
+  if (tensor.is_floating_point()) {
+    auto flat = tensor.detach().to(torch::kFloat32).reshape({-1});
+    const int64_t finite_count = torch::isfinite(flat).sum().item<int64_t>();
+    const int64_t nan_count = torch::isnan(flat).sum().item<int64_t>();
+    const int64_t inf_count = torch::isinf(flat).sum().item<int64_t>();
+    LOG(WARNING) << "[XLLM_DEBUG][dsv4_gate] layer=" << layer_id
+                 << " hash_layer=" << hash_layer << " stage=" << stage << " "
+                 << tag << " shape=" << tensor.sizes()
+                 << " dtype=" << tensor.scalar_type()
+                 << " finite=" << finite_count << "/" << flat.numel()
+                 << " nan=" << nan_count << " inf=" << inf_count
+                 << " min=" << flat.min().item<float>()
+                 << " max=" << flat.max().item<float>()
+                 << " mean=" << flat.mean().item<float>();
+    return;
+  }
+  auto flat = tensor.detach().to(torch::kLong).reshape({-1});
+  LOG(WARNING) << "[XLLM_DEBUG][dsv4_gate] layer=" << layer_id
+               << " hash_layer=" << hash_layer << " stage=" << stage << " "
+               << tag << " shape=" << tensor.sizes()
+               << " dtype=" << tensor.scalar_type()
+               << " min=" << flat.min().item<int64_t>()
+               << " max=" << flat.max().item<int64_t>();
+}
+
+void log_gate_idx_range(int32_t layer_id,
+                        bool hash_layer,
+                        const char* stage,
+                        const torch::Tensor& topk_idx,
+                        int64_t n_routed_experts) {
+  if (!debug_gate_stats() || !topk_idx.defined() || topk_idx.numel() == 0) {
+    return;
+  }
+  auto flat = topk_idx.detach().to(torch::kLong).reshape({-1});
+  const int64_t min = flat.min().item<int64_t>();
+  const int64_t max = flat.max().item<int64_t>();
+  const int64_t below_zero = (flat < 0).sum().item<int64_t>();
+  const int64_t above_range = (flat >= n_routed_experts).sum().item<int64_t>();
+  LOG(WARNING) << "[XLLM_DEBUG][dsv4_gate] layer=" << layer_id
+               << " hash_layer=" << hash_layer << " stage=" << stage
+               << " topk_idx_range min=" << min << " max=" << max
+               << " invalid_below_zero=" << below_zero
+               << " invalid_ge_n_experts=" << above_range
+               << " n_routed_experts=" << n_routed_experts;
+}
+
+void log_gate_compare(int32_t layer_id,
+                      bool hash_layer,
+                      const torch::Tensor& fused_weights,
+                      const torch::Tensor& fused_idx,
+                      const torch::Tensor& native_weights,
+                      const torch::Tensor& native_idx) {
+  if (!debug_gate_compare() || !fused_weights.defined() ||
+      !fused_idx.defined() || !native_weights.defined() ||
+      !native_idx.defined()) {
+    return;
+  }
+  auto fused_idx_cpu = fused_idx.detach().to(torch::kLong).to(torch::kCPU);
+  auto native_idx_cpu = native_idx.detach().to(torch::kLong).to(torch::kCPU);
+  auto fused_w_cpu = fused_weights.detach().to(torch::kFloat32).to(torch::kCPU);
+  auto native_w_cpu =
+      native_weights.detach().to(torch::kFloat32).to(torch::kCPU);
+  const int64_t rows =
+      std::min<int64_t>(fused_idx_cpu.size(0), native_idx_cpu.size(0));
+  const int64_t topk =
+      std::min<int64_t>(fused_idx_cpu.size(1), native_idx_cpu.size(1));
+  int64_t ordered_idx_mismatch = 0;
+  int64_t set_idx_mismatch_rows = 0;
+  for (int64_t row = 0; row < rows; ++row) {
+    bool set_match = true;
+    for (int64_t k = 0; k < topk; ++k) {
+      const int64_t id = fused_idx_cpu[row][k].item<int64_t>();
+      if (id != native_idx_cpu[row][k].item<int64_t>()) {
+        ++ordered_idx_mismatch;
+      }
+      bool found = false;
+      for (int64_t j = 0; j < topk; ++j) {
+        if (id == native_idx_cpu[row][j].item<int64_t>()) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        set_match = false;
+      }
+    }
+    if (!set_match) {
+      ++set_idx_mismatch_rows;
+    }
+  }
+  auto weight_abs_diff = torch::abs(fused_w_cpu - native_w_cpu);
+  LOG(WARNING) << "[XLLM_DEBUG][dsv4_gate_compare] layer=" << layer_id
+               << " hash_layer=" << hash_layer << " rows=" << rows
+               << " topk=" << topk
+               << " ordered_idx_mismatch=" << ordered_idx_mismatch << "/"
+               << (rows * topk)
+               << " set_idx_mismatch_rows=" << set_idx_mismatch_rows << "/"
+               << rows
+               << " weight_max_abs_diff=" << weight_abs_diff.max().item<float>()
+               << " weight_mean_abs_diff="
+               << weight_abs_diff.mean().item<float>();
+}
+
 bool check_npu_moe_gating_top_k(const torch::Tensor& hidden_states,
                                 int64_t top_k,
                                 bool renormalize,
@@ -89,12 +234,12 @@ DeepseekV4GateImpl::DeepseekV4GateImpl(const ModelContext& context,
 DeepseekV4GateImpl::DeepseekV4GateImpl(const ModelArgs& args,
                                        int32_t layer_id,
                                        const torch::TensorOptions& options) {
+  layer_id_ = layer_id;
   hidden_size_ = args.hidden_size();
   n_routed_experts_ = args.n_routed_experts();
   topk_ = args.n_activated_experts();
   n_hash_layers_ = args.n_hash_layers();
-  route_scale_ =
-      1.0;  // args.routed_scaling_factor(); # TODO: add param for dsv4
+  route_scale_ = static_cast<double>(args.routed_scaling_factor());
   score_func_ = args.scoring_func();
   hash_layer_ = layer_id >= 0 && layer_id < n_hash_layers_;
 
@@ -146,12 +291,38 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4GateImpl::forward(
       << "DeepseekV4Gate::forward hidden_states last dim mismatch, expected "
       << hidden_size_ << " got " << hidden_states.size(-1);
 
-  auto logits = torch::matmul(hidden_states, weight_.transpose(0, 1));
+  auto logits = torch::matmul(hidden_states.to(torch::kFloat32),
+                              weight_.to(torch::kFloat32).transpose(0, 1));
+  log_gate_tensor_stats(
+      layer_id_, hash_layer_, "pre_gate", "hidden_states", hidden_states);
+  log_gate_tensor_stats(layer_id_, hash_layer_, "pre_gate", "logits", logits);
+  if (input_ids.has_value() && input_ids.value().defined()) {
+    log_gate_tensor_stats(
+        layer_id_, hash_layer_, "pre_gate", "input_ids", input_ids.value());
+  }
+  if (debug_gate_weight_stats()) {
+    log_gate_tensor_stats(
+        layer_id_, hash_layer_, "pre_gate", "weight", weight_);
+    if (tid2eid_.defined()) {
+      log_gate_tensor_stats(
+          layer_id_, hash_layer_, "pre_gate", "tid2eid", tid2eid_);
+    }
+    if (bias_.defined()) {
+      log_gate_tensor_stats(layer_id_, hash_layer_, "pre_gate", "bias", bias_);
+    }
+  }
 
   constexpr bool renormalize = true;
   const int64_t norm_type = score_func_to_norm_type(score_func_);
   if (!use_fused_moe_gating_top_k_hash()) {
-    return select_experts_native(logits, input_ids);
+    auto [topk_weights, topk_idx] = select_experts_native(logits, input_ids);
+    log_gate_tensor_stats(
+        layer_id_, hash_layer_, "native_output", "topk_weights", topk_weights);
+    log_gate_tensor_stats(
+        layer_id_, hash_layer_, "native_output", "topk_idx", topk_idx);
+    log_gate_idx_range(
+        layer_id_, hash_layer_, "native_output", topk_idx, n_routed_experts_);
+    return std::make_tuple(topk_weights, topk_idx);
   }
 
   const bool is_support_npu_moe_gating_top_k =
@@ -193,7 +364,14 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4GateImpl::forward(
   }
   auto [topk_weights, topk_idx, score_out] =
       kernel::moe_gating_top_k_hash(gate_params);
-  (void)score_out;
+  log_gate_tensor_stats(
+      layer_id_, hash_layer_, "fused_output", "topk_weights", topk_weights);
+  log_gate_tensor_stats(
+      layer_id_, hash_layer_, "fused_output", "topk_idx", topk_idx);
+  log_gate_tensor_stats(
+      layer_id_, hash_layer_, "fused_output", "score_out", score_out);
+  log_gate_idx_range(
+      layer_id_, hash_layer_, "fused_output", topk_idx, n_routed_experts_);
 
   if (gate_params.norm_type == 0 && renormalize) {
     topk_weights = renormalize_topk_weights(topk_weights);
@@ -201,6 +379,25 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4GateImpl::forward(
 
   if (gate_params.norm_type == 2) {
     topk_weights = renormalize_topk_weights(topk_weights);
+  }
+  log_gate_tensor_stats(
+      layer_id_, hash_layer_, "fused_post_norm", "topk_weights", topk_weights);
+  if (debug_gate_compare()) {
+    auto [native_weights, native_idx] =
+        select_experts_native(logits, input_ids);
+    log_gate_tensor_stats(layer_id_,
+                          hash_layer_,
+                          "native_compare",
+                          "topk_weights",
+                          native_weights);
+    log_gate_tensor_stats(
+        layer_id_, hash_layer_, "native_compare", "topk_idx", native_idx);
+    log_gate_compare(layer_id_,
+                     hash_layer_,
+                     topk_weights,
+                     topk_idx,
+                     native_weights,
+                     native_idx);
   }
 
   return std::make_tuple(topk_weights, topk_idx.to(torch::kInt32));
@@ -226,8 +423,13 @@ DeepseekV4GateImpl::select_experts_native(
   }
 
   torch::Tensor topk_idx;
-  if (hash_layer_ && input_ids.has_value() && input_ids.value().defined() &&
-      tid2eid_.defined()) {
+  if (hash_layer_) {
+    CHECK(input_ids.has_value() && input_ids.value().defined())
+        << "DeepseekV4Gate hash layer requires input_ids";
+    CHECK(tid2eid_.defined()) << "DeepseekV4Gate hash layer requires tid2eid";
+    CHECK_EQ(input_ids.value().numel(), router_logits.size(0))
+        << "DeepseekV4Gate hash layer input_ids numel must match rows, got "
+        << input_ids.value().numel() << " vs " << router_logits.size(0);
     auto lookup_ids = input_ids.value().to(torch::kLong);
     topk_idx = tid2eid_.index({lookup_ids});
   } else {
@@ -240,9 +442,11 @@ DeepseekV4GateImpl::select_experts_native(
 
   auto gather_idx = topk_idx.to(torch::kLong);
   auto topk_weights = original_scores.gather(-1, gather_idx);
-  auto denom = topk_weights.sum(-1, true);
-  denom = torch::clamp_min(denom, 1e-20);
-  topk_weights = topk_weights / denom;
+  if (norm_type != 0) {
+    auto denom = topk_weights.sum(-1, true);
+    denom = torch::clamp_min(denom, 1e-20);
+    topk_weights = topk_weights / denom;
+  }
   topk_weights = topk_weights * route_scale_;
 
   return std::make_tuple(topk_weights, gather_idx.to(torch::kInt32));

@@ -55,6 +55,7 @@ class DeepseekV4GateImpl : public torch::nn::Module {
   int64_t topk_ = 1;
   int64_t n_routed_experts_ = 0;
   int64_t n_hash_layers_ = 0;
+  int32_t layer_id_ = -1;
   double route_scale_ = 1.0;
   std::string score_func_ = "softmax";
   bool hash_layer_ = false;
