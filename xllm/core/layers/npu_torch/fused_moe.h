@@ -76,7 +76,6 @@ class FusedMoEImpl : public torch::nn::Module {
   int64_t topk_;
   int64_t num_expert_group_;
   int64_t topk_group_;
-  double route_scale_;
   int64_t hidden_size_;
   int64_t n_shared_experts_;
   bool is_gated_;

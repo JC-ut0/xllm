@@ -395,7 +395,6 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
       topk_(model_args.num_experts_per_tok()),
       num_expert_group_(model_args.n_group()),
       topk_group_(model_args.topk_group()),
-      route_scale_(model_args.routed_scaling_factor()),
       hidden_size_(model_args.hidden_size()),
       n_shared_experts_(model_args.n_shared_experts()),
       is_gated_(moe_args.is_gated),
@@ -804,7 +803,6 @@ torch::Tensor FusedMoEImpl::select_experts(
     moe_active_topk_params.normalize = static_cast<bool>(renormalize_);
     // moe_active_topk_params.normed_by = "topk_logit";
     moe_active_topk_params.scoring_func = scoring_func_;
-    // moe_active_topk_params.route_scale = route_scale_;
     // moe_active_topk_params.e_score_correction_bias = e_score_correction_bias;
     std::tie(topk_weights, topk_ids) =
         xllm::kernel::moe_active_topk(moe_active_topk_params);
