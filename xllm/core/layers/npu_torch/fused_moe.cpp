@@ -133,10 +133,23 @@ torch::Tensor swiglu_with_clamp(const torch::Tensor& input,
   return torch::silu(gate) * up;
 }
 
+torch::ScalarType dynamic_quant_supported_dtype(
+    torch::ScalarType preferred_dtype) {
+  return (preferred_dtype == torch::kFloat16 ||
+          preferred_dtype == torch::kBFloat16)
+             ? preferred_dtype
+             : torch::kBFloat16;
+}
+
 std::tuple<torch::Tensor, torch::Tensor> swiglu_clamp_dynamic_quant(
     const torch::Tensor& input,
-    double swiglu_limit) {
+    double swiglu_limit,
+    torch::ScalarType output_dtype) {
   auto swiglu = swiglu_with_clamp(input, swiglu_limit);
+  const auto quant_input_dtype = dynamic_quant_supported_dtype(output_dtype);
+  if (swiglu.scalar_type() != quant_input_dtype) {
+    swiglu = swiglu.to(quant_input_dtype);
+  }
   xllm::kernel::NpuQuantizeParams quant_params;
   quant_params.input = swiglu;
   torch::Tensor quantized;
@@ -928,8 +941,8 @@ torch::Tensor FusedMoEImpl::forward_expert(
             pertoken_scale.value().to(torch::kFloat32).unsqueeze(/*dim=*/-1);
         auto gate_up =
             gemm1_out.to(torch::kFloat32) * weight_scale * activation_scale;
-        std::tie(act_quantized, act_scale) =
-            swiglu_clamp_dynamic_quant(gate_up, swiglu_limit);
+        std::tie(act_quantized, act_scale) = swiglu_clamp_dynamic_quant(
+            gate_up, swiglu_limit, hidden_states_dtype);
       } else {
         xllm::kernel::DequantSwigluQuantParams params;
         params.x = gemm1_out;
@@ -1032,6 +1045,11 @@ torch::Tensor FusedMoEImpl::forward_expert(
       activation_params.is_gated = is_gated_;
       xllm::kernel::active(activation_params);
       act_out = activation_params.output;
+    }
+    const auto w4a8_quant_input_dtype =
+        dynamic_quant_supported_dtype(w4a8_group_gemm_output_dtype);
+    if (act_out.scalar_type() != w4a8_quant_input_dtype) {
+      act_out = act_out.to(w4a8_quant_input_dtype);
     }
 
     torch::Tensor act_quantized;
@@ -1535,8 +1553,8 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
             pertoken_scale.value().to(torch::kFloat32).unsqueeze(/*dim=*/-1);
         auto gate_up =
             gemm1_out.to(torch::kFloat32) * weight_scale * activation_scale;
-        std::tie(act_quantized, act_scale) =
-            swiglu_clamp_dynamic_quant(gate_up, swiglu_limit);
+        std::tie(act_quantized, act_scale) = swiglu_clamp_dynamic_quant(
+            gate_up, swiglu_limit, hidden_states_dtype);
       } else {
         xllm::kernel::DequantSwigluQuantParams params;
         params.x = gemm1_out;
