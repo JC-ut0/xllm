@@ -1118,9 +1118,6 @@ torch::Tensor FusedMoEImpl::forward_expert(
   moe_combine_params.gather_ids = selected_expert_info.combine_idx;
   torch::Tensor final_hidden_states =
       xllm::kernel::moe_combine_result(moe_combine_params);
-  if (is_deepseek_v4_) {
-    final_hidden_states = final_hidden_states * route_scale_;
-  }
   // reshape the final hidden states to the original shape
   final_hidden_states = final_hidden_states.reshape(hidden_states_shape);
 
@@ -1356,9 +1353,6 @@ torch::Tensor FusedMoEImpl::forward_with_dispatch_ffn_combine(
   std::tie(final_hidden_states_2d, expert_token_nums) =
       xllm::kernel::dispatch_ffn_combine(params);
   (void)expert_token_nums;
-  if (is_deepseek_v4_) {
-    final_hidden_states_2d = final_hidden_states_2d * route_scale_;
-  }
   return final_hidden_states_2d.reshape(hidden_states_shape);
 }
 
@@ -1395,9 +1389,6 @@ torch::Tensor FusedMoEImpl::forward_with_dispatch_gmm_combine_decode(
   std::tie(final_hidden_states_2d, expert_token_nums) =
       xllm::kernel::dispatch_gmm_combine_decode(params);
   (void)expert_token_nums;
-  if (is_deepseek_v4_) {
-    final_hidden_states_2d = final_hidden_states_2d * route_scale_;
-  }
   return final_hidden_states_2d.reshape(hidden_states_shape);
 }
 
@@ -1645,9 +1636,6 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
   combine_params.global_bs = global_bs;
   auto final_hidden_states_2d =
       xllm::kernel::moe_distribute_combine_v2(combine_params);
-  if (is_deepseek_v4_) {
-    final_hidden_states_2d = final_hidden_states_2d * route_scale_;
-  }
 
   return final_hidden_states_2d.reshape(hidden_states_shape);
 }
