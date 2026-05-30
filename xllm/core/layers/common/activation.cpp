@@ -15,14 +15,50 @@ limitations under the License.
 
 #include "activation.h"
 
+#include <glog/logging.h>
+
+#include <cmath>
+
 #include "kernels/ops_api.h"
 namespace xllm {
 namespace layer {
 
-ActivationImpl::ActivationImpl(const std::string& act_mode, bool is_gated)
-    : act_mode_(act_mode), is_gated_(is_gated) {}
+namespace {
+
+bool has_effective_swiglu_limit(double swiglu_limit) {
+  return std::isfinite(swiglu_limit) && swiglu_limit > 0.0 &&
+         swiglu_limit < 1000000.0;
+}
+
+torch::Tensor swiglu_with_clamp(const torch::Tensor& input,
+                                double swiglu_limit) {
+  CHECK(input.defined()) << "SwiGLU input is undefined.";
+  CHECK_GT(input.dim(), 0) << "SwiGLU input must have at least one dimension.";
+  const int64_t last_dim = input.size(-1);
+  CHECK_EQ(last_dim % 2, 0)
+      << "SwiGLU input last dimension must be even, got " << last_dim;
+  const int64_t half_dim = last_dim / 2;
+  auto gate = input.slice(/*dim=*/-1, /*start=*/0, /*end=*/half_dim);
+  auto up = input.slice(/*dim=*/-1, /*start=*/half_dim, /*end=*/last_dim);
+  gate = torch::clamp_max(gate, swiglu_limit);
+  up = torch::clamp_min(torch::clamp_max(up, swiglu_limit), -swiglu_limit);
+  return torch::silu(gate) * up;
+}
+
+}  // namespace
+
+ActivationImpl::ActivationImpl(const std::string& act_mode,
+                               bool is_gated,
+                               double swiglu_limit)
+    : act_mode_(act_mode), is_gated_(is_gated), swiglu_limit_(swiglu_limit) {}
 
 void ActivationImpl::forward(torch::Tensor& input, torch::Tensor& output) {
+  if (is_gated_ && (act_mode_ == "silu" || act_mode_ == "swiglu") &&
+      has_effective_swiglu_limit(swiglu_limit_)) {
+    output = swiglu_with_clamp(input, swiglu_limit_);
+    return;
+  }
+
   xllm::kernel::ActivationParams activation_params;
   activation_params.input = input;
   activation_params.output = output;

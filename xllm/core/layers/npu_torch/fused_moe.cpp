@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <numeric>
 #include <string>
@@ -110,6 +111,54 @@ bool is_supported_dynamic_moe_quant_method(
     const std::optional<std::string>& quant_method) {
   return is_w8a8_dynamic_quant_method(quant_method) ||
          is_w4a8_dynamic_quant_method(quant_method);
+}
+
+bool has_effective_swiglu_limit(double swiglu_limit) {
+  return std::isfinite(swiglu_limit) && swiglu_limit > 0.0 &&
+         swiglu_limit < 1000000.0;
+}
+
+torch::Tensor swiglu_with_clamp(const torch::Tensor& input,
+                                double swiglu_limit) {
+  CHECK(input.defined()) << "SwiGLU input is undefined.";
+  CHECK_GT(input.dim(), 0) << "SwiGLU input must have at least one dimension.";
+  const int64_t last_dim = input.size(-1);
+  CHECK_EQ(last_dim % 2, 0)
+      << "SwiGLU input last dimension must be even, got " << last_dim;
+  const int64_t half_dim = last_dim / 2;
+  auto gate = input.slice(/*dim=*/-1, /*start=*/0, /*end=*/half_dim);
+  auto up = input.slice(/*dim=*/-1, /*start=*/half_dim, /*end=*/last_dim);
+  gate = torch::clamp_max(gate, swiglu_limit);
+  up = torch::clamp_min(torch::clamp_max(up, swiglu_limit), -swiglu_limit);
+  return torch::silu(gate) * up;
+}
+
+std::tuple<torch::Tensor, torch::Tensor> swiglu_clamp_dynamic_quant(
+    const torch::Tensor& input,
+    double swiglu_limit) {
+  auto swiglu = swiglu_with_clamp(input, swiglu_limit);
+  xllm::kernel::NpuQuantizeParams quant_params;
+  quant_params.input = swiglu;
+  torch::Tensor quantized;
+  std::optional<torch::Tensor> scale;
+  std::tie(quantized, scale) = xllm::kernel::dynamic_quant(quant_params);
+  CHECK(scale.has_value() && scale->defined())
+      << "dynamic_quant must return activation scale after clamped SwiGLU.";
+  return std::make_tuple(quantized, scale.value());
+}
+
+torch::Tensor expand_grouped_weight_scale_for_tokens(
+    const torch::Tensor& weight_scale,
+    const torch::Tensor& token_count_slice,
+    int64_t token_count) {
+  auto expanded_scale =
+      weight_scale.to(torch::kFloat32)
+          .repeat_interleave(token_count_slice.to(torch::kLong),
+                             /*dim=*/0,
+                             /*output_size=*/token_count);
+  CHECK_EQ(expanded_scale.size(0), token_count)
+      << "Expanded grouped weight scale token dimension mismatch.";
+  return expanded_scale;
 }
 
 torch::Tensor convert_fp32_scale_to_int64(const torch::Tensor& scale) {
@@ -401,7 +450,9 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
                                  /*enable_result_reduction=*/false,
                                  quant_args,
                                  tp_pg_,
-                                 options));
+                                 options,
+                                 /*module_prefix=*/"",
+                                 is_deepseek_v4_ ? 10.0 : 0.0));
     shared_expert_gate_ = register_module(
         "shared_expert_gate",
         torch::nn::Linear(
@@ -810,6 +861,9 @@ torch::Tensor FusedMoEImpl::forward_expert(
 
   torch::Tensor gemm1_out;
   torch::Tensor gemm2_out;
+  const double swiglu_limit = is_deepseek_v4_ ? 10.0 : 0.0;
+  const bool use_explicit_swiglu_clamp =
+      has_effective_swiglu_limit(swiglu_limit);
   if (is_w8a8_dynamic_quant_method(resolved_moe_quant_method_)) {
     CHECK(w13_scale_is_loaded_ && w13_scale_.defined())
         << "w13_scale is required for W8A8 fused MoE.";
@@ -836,7 +890,7 @@ torch::Tensor FusedMoEImpl::forward_expert(
     // Step 5-6: first grouped matmul + fused dequant + swiglu + quant.
     torch::Tensor act_quantized;
     torch::Tensor act_scale;
-    if (FLAGS_enable_fused_moe_gmm_swiglu) {
+    if (FLAGS_enable_fused_moe_gmm_swiglu && !use_explicit_swiglu_clamp) {
       CHECK(is_gated_ && (hidden_act_ == "silu" || hidden_act_ == "swiglu"))
           << "--enable_fused_moe_gmm_swiglu requires gated SiLU/SwiGLU MoE, "
           << "got is_gated=" << (is_gated_ ? "true" : "false")
@@ -865,15 +919,28 @@ torch::Tensor FusedMoEImpl::forward_expert(
       group_gemm_params.output_dtype = torch::kInt32;
       gemm1_out = xllm::kernel::group_gemm(group_gemm_params);
 
-      xllm::kernel::DequantSwigluQuantParams params;
-      params.x = gemm1_out;
-      params.weight_scale = w13_scale_;
-      params.activation_scale = pertoken_scale.value();
-      params.group_index = selected_expert_info.token_count_slice;
-      params.activate_left = true;
-      params.quant_mode = 1;
-      std::tie(act_quantized, act_scale) =
-          xllm::kernel::dequant_swiglu_quant(params);
+      if (use_explicit_swiglu_clamp) {
+        auto weight_scale = expand_grouped_weight_scale_for_tokens(
+            w13_scale_,
+            selected_expert_info.token_count_slice,
+            gemm1_out.size(0));
+        auto activation_scale =
+            pertoken_scale.value().to(torch::kFloat32).unsqueeze(/*dim=*/-1);
+        auto gate_up =
+            gemm1_out.to(torch::kFloat32) * weight_scale * activation_scale;
+        std::tie(act_quantized, act_scale) =
+            swiglu_clamp_dynamic_quant(gate_up, swiglu_limit);
+      } else {
+        xllm::kernel::DequantSwigluQuantParams params;
+        params.x = gemm1_out;
+        params.weight_scale = w13_scale_;
+        params.activation_scale = pertoken_scale.value();
+        params.group_index = selected_expert_info.token_count_slice;
+        params.activate_left = true;
+        params.quant_mode = 1;
+        std::tie(act_quantized, act_scale) =
+            xllm::kernel::dequant_swiglu_quant(params);
+      }
     }
 
     // Step 7: second grouped matmul (dequant to hidden dtype).
@@ -955,13 +1022,17 @@ torch::Tensor FusedMoEImpl::forward_expert(
     }
 
     torch::Tensor act_out;
-    xllm::kernel::ActivationParams activation_params;
-    activation_params.input = gemm1_out;
-    activation_params.output = act_out;
-    activation_params.act_mode = hidden_act_;
-    activation_params.is_gated = is_gated_;
-    xllm::kernel::active(activation_params);
-    act_out = activation_params.output;
+    if (use_explicit_swiglu_clamp) {
+      act_out = swiglu_with_clamp(gemm1_out, swiglu_limit);
+    } else {
+      xllm::kernel::ActivationParams activation_params;
+      activation_params.input = gemm1_out;
+      activation_params.output = act_out;
+      activation_params.act_mode = hidden_act_;
+      activation_params.is_gated = is_gated_;
+      xllm::kernel::active(activation_params);
+      act_out = activation_params.output;
+    }
 
     torch::Tensor act_quantized;
     std::optional<torch::Tensor> act_scale;
@@ -1411,6 +1482,9 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
   torch::Tensor gemm1_out;
   torch::Tensor gemm2_out;
   const auto hidden_states_dtype = hidden_states.dtype().toScalarType();
+  const double swiglu_limit = is_deepseek_v4_ ? 10.0 : 0.0;
+  const bool use_explicit_swiglu_clamp =
+      has_effective_swiglu_limit(swiglu_limit);
   if (is_w8a8_dynamic_quant_method(resolved_moe_quant_method_)) {
     CHECK(w13_scale_is_loaded_ && w13_scale_.defined())
         << "w13_scale is required for W8A8 EP2 dispatch/combine.";
@@ -1434,7 +1508,7 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
 
     torch::Tensor act_quantized;
     torch::Tensor act_scale;
-    if (FLAGS_enable_fused_moe_gmm_swiglu) {
+    if (FLAGS_enable_fused_moe_gmm_swiglu && !use_explicit_swiglu_clamp) {
       CHECK(is_gated_ && (hidden_act_ == "silu" || hidden_act_ == "swiglu"))
           << "--enable_fused_moe_gmm_swiglu requires gated SiLU/SwiGLU MoE, "
           << "got is_gated=" << (is_gated_ ? "true" : "false")
@@ -1462,15 +1536,27 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
       group_gemm_params.output_dtype = torch::kInt32;
       gemm1_out = xllm::kernel::group_gemm(group_gemm_params);
 
-      xllm::kernel::DequantSwigluQuantParams params;
-      params.x = gemm1_out;
-      params.weight_scale = w13_scale_;
-      params.activation_scale = pertoken_scale.value();
-      params.group_index = group_list.to(torch::kInt64);
-      params.activate_left = true;
-      params.quant_mode = 1;
-      std::tie(act_quantized, act_scale) =
-          xllm::kernel::dequant_swiglu_quant(params);
+      if (use_explicit_swiglu_clamp) {
+        auto group_list_i64 = group_list.to(torch::kInt64);
+        auto weight_scale = expand_grouped_weight_scale_for_tokens(
+            w13_scale_, group_list_i64, gemm1_out.size(0));
+        auto activation_scale =
+            pertoken_scale.value().to(torch::kFloat32).unsqueeze(/*dim=*/-1);
+        auto gate_up =
+            gemm1_out.to(torch::kFloat32) * weight_scale * activation_scale;
+        std::tie(act_quantized, act_scale) =
+            swiglu_clamp_dynamic_quant(gate_up, swiglu_limit);
+      } else {
+        xllm::kernel::DequantSwigluQuantParams params;
+        params.x = gemm1_out;
+        params.weight_scale = w13_scale_;
+        params.activation_scale = pertoken_scale.value();
+        params.group_index = group_list.to(torch::kInt64);
+        params.activate_left = true;
+        params.quant_mode = 1;
+        std::tie(act_quantized, act_scale) =
+            xllm::kernel::dequant_swiglu_quant(params);
+      }
     }
 
     ensure_group_gemm_weight_layout(w2_,
